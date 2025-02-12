@@ -396,20 +396,31 @@ class MenuStarter(ABC):
 class MenuCreator:
     def __init__(self, surface: pygame.Surface):
         self.__surface = surface
-        self.__theme = pygame_menu.themes.THEME_BLUE.copy()
-        self.__theme.background_color = BACKGROUND_IMAGE
-        self.__theme.selection_color = (212, 212, 212)
-        self.__theme.widget_font_shadow = True
+        self.__theme_1 = pygame_menu.themes.THEME_BLUE.copy()
+        self.__theme_1.background_color = BACKGROUND_IMAGE
+        self.__theme_1.selection_color = (212, 212, 212)
+        self.__theme_1.widget_font_shadow = True
+        self.__theme_2 = self.__theme_1.copy()
+        self.__theme_2.background_color = (0, 0, 128)
+        self.__theme_2.set_background_color_opacity(0.5)
 
     def get_surface(self) -> pygame.Surface:
         return self.__surface
 
-    def create_menu(self, menu_title: str) -> pygame_menu.Menu:
+    def create_menu(self, menu_title: str, height: Optional[int] = None, width: Optional[int] = None, theme_nr = 1) -> pygame_menu.Menu:
+        if height is None:
+            height = self.__surface.get_height()
+        if width is None:
+            width = self.__surface.get_width()
+        if theme_nr == 1:
+            theme = self.__theme_1
+        else:
+            theme = self.__theme_2
         return pygame_menu.Menu(
             title=menu_title,
-            height=self.__surface.get_height(),
-            width=self.__surface.get_width(),
-            theme=self.__theme,
+            height=height,
+            width=width,
+            theme=theme,
         )
 
 @final
@@ -648,7 +659,7 @@ class MainMenuCreator:
             menu_title=change_options_text,
             back_text=back_text,
         ))
-        menu.add.button(save_options_text, main_menu.save_options)
+        # TODO: menu.add.button(save_options_text, main_menu.save_options)
         menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         menu.add.button("Verlassen", main_menu.exit)
         return main_menu
@@ -766,6 +777,13 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
 
 #-------------------------------------------------------------------------------
 
+def blit_image_helper(surface: pygame.Surface, image: pygame.Surface)-> None:
+    y_pos = (surface.get_height() - image.get_height()) // 2
+    x_pos = (surface.get_width() - image.get_width()) // 2
+    surface.blit(image, (x_pos, y_pos))
+
+#-------------------------------------------------------------------------------
+
 class DiashowSegment(ABC):
     @abstractmethod
     def get_lifetime_in_seconds(self) -> float:
@@ -847,11 +865,6 @@ class ImageLoader:
         else:
             return self.__image1
 
-def blit_image_helper(surface: pygame.Surface, image: pygame.Surface)-> None:
-    y_pos = (surface.get_height() - image.get_height()) // 2
-    x_pos = (surface.get_width() - image.get_width()) // 2
-    surface.blit(image, (x_pos, y_pos))
-
 @final
 class StartDiashowSegment(DiashowSegment):
     def __init__(self, timing: DiashowTiming, loader: ImageLoader):
@@ -903,7 +916,7 @@ class EndDiashowSegment(DiashowSegment):
             blit_image_helper(surface, image)
 
 @final
-class FadeOverDiashowSegment(DiashowSegment):
+class CrossFadeDiashowSegment(DiashowSegment):
     def __init__(self, timing: DiashowTiming, loader: ImageLoader, prev_index: int, next_index: int):
         self.__timing = timing
         self.__loader = loader
@@ -1004,17 +1017,78 @@ class DiashowTimelineFactory:
             self.__add_to_timeline(timeline, StartDiashowSegment(self.__timing, self.__loader))
             for index, image in enumerate(images[:-1]):
                 self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, image, index))
-                self.__add_to_timeline(timeline, FadeOverDiashowSegment(self.__timing, self.__loader, index, index + 1))
+                self.__add_to_timeline(timeline, CrossFadeDiashowSegment(self.__timing, self.__loader, index, index + 1))
             self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, images[-1], -1))
             self.__add_to_timeline(timeline, EndDiashowSegment(self.__timing, self.__loader))
             self.__add_to_timeline(timeline, StopDiashowSegment())
         return timeline
 
+class DiashowController(ABC):
+    @abstractmethod
+    def goto_prev_image(self) -> None:
+        pass
+
+    @abstractmethod
+    def goto_next_image(self) -> None:
+        pass
+
+    @abstractmethod
+    def set_speed(self, speed: Any) -> None:
+        pass
+
+    @abstractmethod
+    def cancel(self) -> None:
+        pass
+
 @final
-class DiashowPlayer:
-    def __init__(self, play_node: DiashowNode, timing: DiashowTiming):
+class InDiashowMenu:
+    MENU_SHOW_DURATION_IN_SECONDS = 2.0
+
+    def __init__(self, menu_creator: MenuCreator, diashow_controller: DiashowController):
+        self.__surface = menu_creator.get_surface()
+        self.__end_time_in_seconds = 0.0
+
+        # create menu
+        self.__menu = menu_creator.create_menu("Diashow", height=400, width=800, theme_nr=2)
+        self.__menu.add.button("Bild zurück", diashow_controller.goto_prev_image)
+        self.__menu.add.button("Bild vor", diashow_controller.goto_next_image)
+        self.__menu.add.range_slider("Geschwindigkeit: ", 1.0, (0.25, 5.0), increment=0.25,
+            value_format=lambda x: str(round(x, 2)) + "x", onchange=diashow_controller.set_speed)
+        self.__menu.add.button("Verlassen", diashow_controller.cancel)
+        self.__menu.disable()
+
+    def show_menu(self, time_in_seconds: float) -> None:
+        self.__end_time_in_seconds = time_in_seconds + self.MENU_SHOW_DURATION_IN_SECONDS
+        self.__menu.enable()
+
+    def update(self, time_in_seconds: float, events: List[pygame.event.Event]) -> None:
+        if self.__menu.enable():
+            if time_in_seconds <= self.__end_time_in_seconds:
+                self.__menu.update(events)
+                self.__menu.draw(self.__surface)
+            else:
+                self.__menu.disable()
+
+@final
+class DiashowPlayer(DiashowController):
+    def __init__(self, play_node: DiashowNode, timing: DiashowTiming, menu_creator: MenuCreator):
         self.__play_node = play_node
         self.__timing = timing
+        self.__menu_creator = menu_creator
+        self.__speed = 1.0
+        self.__run = True
+
+    def goto_prev_image(self) -> None:
+        pass  # TODO
+
+    def goto_next_image(self) -> None:
+        pass  # TODO
+
+    def set_speed(self, speed: Any) -> None:
+        self.__speed = speed
+
+    def cancel(self) -> None:
+        self.__run = False
 
     def start(self, surface: pygame.Surface) -> None:
         clock = pygame.time.Clock()
@@ -1030,25 +1104,39 @@ class DiashowPlayer:
         assert len(timeline) > 0
         assert isinstance(timeline[-1][1], StopDiashowSegment)
         timeline[0][1].start()
+        menu = InDiashowMenu(menu_creator=self.__menu_creator, diashow_controller=self)
 
         # start diashow
         timeline_index = 0
         start_time = get_current_time_since_epoch_in_seconds()
-        while True:
-            current_time = get_current_time_since_epoch_in_seconds() - start_time
+        while self.__run:
+            # try to disable mouse visibility
+            pygame.mouse.set_visible(False)
+
+            # save current time
+            current_time = get_current_time_since_epoch_in_seconds()
+
+            # check events
+            events = pygame.event.get()
+            if events:
+                menu.show_menu(current_time)
+
+            # calculate timeline
+            segment_time = current_time - start_time
             next_time, next_segment = timeline[timeline_index + 1]
             index_changed = False
-            if current_time >= next_time:
+            if segment_time >= next_time:
                 if isinstance(next_segment, StopDiashowSegment):
                     break
                 timeline_index += 1
                 index_changed = True
                 next_segment.start()
             actual_time, actual_segment = timeline[timeline_index]
-            actual_segment.update(
-                surface=surface,
-                time_in_seconds=current_time - actual_time,
-            )
+            actual_segment_time = segment_time - actual_time
+
+            # update screen
+            actual_segment.update(surface, actual_segment_time)
+            menu.update(current_time, events)
             pygame.display.flip()
             if not index_changed:
                 clock.tick(FPS)
@@ -1066,7 +1154,6 @@ def main():
 
     # start Diashow menu
     pygame.init()
-    pygame.mouse.set_visible(False)
     try:
         surface = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         menu_creator = MenuCreator(surface)
@@ -1085,6 +1172,7 @@ def main():
                     player = DiashowPlayer(
                         play_node=start_menu.get_play_node(),
                         timing=start_menu.get_timing(),
+                        menu_creator=menu_creator,
                     )
                     player.start(surface)
             elif play_mode == MainMenu.SAVE_CONFIG_MODE:
