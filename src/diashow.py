@@ -11,12 +11,14 @@ Diashow; showing images like a diashow :-)
 # pylint: disable=missing-function-docstring
 # pylint: disable=missing-class-docstring
 # pylint: disable=invalid-name
+# pylint: disable=unnecessary-lambda
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, final
+from typing import List, Tuple, Any, Optional, final
 from enum import Enum
+from abc import ABC, abstractmethod
 
 import os
 import pygame
@@ -29,6 +31,16 @@ DIASHOW_FOLDER = "/media/sf_Exchange/Diashow/"
 
 FILENAME_TAG = "SourceFile"
 RATING_TAG = "XMP:Rating"
+
+SCRIPT_PATH, SCRIPT_NAME = os.path.split(__file__)
+
+BACKGROUND_IMAGE = pygame_menu.BaseImage(
+    image_path=os.path.join(SCRIPT_PATH, "background.jpg"),
+)
+
+DEFAULT_VERTICAL_MARGIN = 35
+
+FPS = 50
 
 #-------------------------------------------------------------------------------
 
@@ -49,7 +61,7 @@ class DiashowImage:
     filename: str
     rating: int
 
-    def __lt__(self, other: DiashowNode) -> bool:
+    def __lt__(self, other: DiashowImage) -> bool:
         return self.filename < other.filename
 
 def print_diashow_nodes(node: DiashowNode, level: int = 0) -> None:
@@ -110,7 +122,7 @@ class Diashow:
 
     def read(self) -> DiashowNode:
         main_node = DiashowNode(
-            nodename="main",
+            nodename="",
             child_nodes=[],
             folder=os.path.join(self.__main_folder, ""),
             images=[],
@@ -147,6 +159,13 @@ class TimeValue(Enum):
     T_20_000_SECS = TimeDefinition(20.00, "20 s")
     T_30_000_SECS = TimeDefinition(30.00, "30 s")
 
+TIME_VALUE_SELECTOR_LIST: List[Tuple[str, TimeValue]] = [
+    (item.value.text, item)
+    for item in TimeValue
+]
+
+#-------------------------------------------------------------------------------
+
 @dataclass
 @final
 class RatingWeighting:
@@ -164,7 +183,7 @@ class DiashowConfig:
     max_time_per_image: TimeValue
     blending_time: Optional[TimeValue]
     weighting: RatingWeighting
-    show_duration_in_minutes: int
+    show_duration_in_minutes: float
 
 @dataclass
 @final
@@ -194,28 +213,28 @@ def create_default_config() -> Config:
             max_time_per_image = TimeValue.T_10_000_SECS,
             blending_time = None,
             weighting = create_default_weighting(),
-            show_duration_in_minutes = 3,
+            show_duration_in_minutes = 2.5,
         ),
         default_diashow_config_m = DiashowConfig(
             min_time_per_image = TimeValue.T_03_000_SECS,
             max_time_per_image = TimeValue.T_10_000_SECS,
             blending_time = None,
             weighting = create_default_weighting(),
-            show_duration_in_minutes = 7,
+            show_duration_in_minutes = 7.5,
         ),
         default_diashow_config_l = DiashowConfig(
             min_time_per_image = TimeValue.T_02_000_SECS,
             max_time_per_image = TimeValue.T_08_000_SECS,
             blending_time = None,
             weighting = create_default_weighting(),
-            show_duration_in_minutes = 12,
+            show_duration_in_minutes = 15.0,
         ),
         default_diashow_config_x = DiashowConfig(
             min_time_per_image = TimeValue.T_02_000_SECS,
             max_time_per_image = TimeValue.T_08_000_SECS,
             blending_time = None,
             weighting = create_default_weighting(),
-            show_duration_in_minutes = 18,
+            show_duration_in_minutes = 20.0,
         ),
         max_image_count_for_s = 30 * 1,
         max_image_count_for_m = 30 * 3,
@@ -280,7 +299,7 @@ class DiashowCalculator:
             self.__1_star_cnt * diashow_config.weighting.star_1 +
             self.__0_star_cnt * diashow_config.weighting.star_0
         )
-        show_duration_in_seconds = float(diashow_config.show_duration_in_minutes) * 60.0
+        show_duration_in_seconds = diashow_config.show_duration_in_minutes * 60.0
         show_duration_in_seconds_per_weight = show_duration_in_seconds / weighting_sum
         if diashow_config.blending_time is None:
             blending_time_in_seconds = 0.0
@@ -308,50 +327,310 @@ class DiashowCalculator:
 
 #-------------------------------------------------------------------------------
 
+NO_BLENDING_TEXT = "ohne Überblendung"
+
+BLENDING_TIME_VALUE_SELECTOR_LIST: List[Tuple[str, Optional[TimeValue]]] = []
+BLENDING_TIME_VALUE_SELECTOR_LIST.append((NO_BLENDING_TEXT, None))
+for item in TimeValue:
+    if item.value.seconds <= 3.0:
+        BLENDING_TIME_VALUE_SELECTOR_LIST.append((item.value.text, item))
+
+def get_blending_time_text(blending_time: Optional[TimeValue]) -> str:
+    if blending_time is None:
+        return NO_BLENDING_TEXT
+    else:
+        return blending_time.value.text
+
+#-------------------------------------------------------------------------------
+
 @final
-class DiashowXXX:
+class MenuCreator:
     def __init__(self, surface: pygame.Surface):
         self.__surface = surface
+        self.__theme = pygame_menu.themes.THEME_BLUE.copy()
+        self.__theme.background_color = BACKGROUND_IMAGE
+        self.__theme.selection_color = (212, 212, 212)
+        self.__theme.widget_font_shadow = True
 
-    def __create_menu(self, label: str, theme: pygame_menu.Theme) -> pygame_menu.Menu:
+    def create_menu(self, menu_title: str) -> pygame_menu.Menu:
         return pygame_menu.Menu(
-            title=label,
+            title=menu_title,
             height=self.__surface.get_height(),
             width=self.__surface.get_width(),
-            theme=theme,
+            theme=self.__theme,
         )
 
-    def main(self):
-        select_diashow_menu = self.__create_menu("Diashow auswählen", pygame_menu.themes.THEME_DARK)
-        select_diashow_menu.add.button("Zurück", pygame_menu.events.BACK)
+class MenuFactory(ABC):
+    @abstractmethod
+    def create_menu(self, menu_creator: MenuCreator, menu_title: str, back_label: str) -> pygame_menu.Menu:
+        pass
 
+@final
+class DiashowOptionsMenuFactory(MenuFactory):
+    def __init__(self, diashow_config: DiashowConfig):
+        self.__diashow_config = diashow_config
 
-        menu = self.__create_menu("Diashow", pygame_menu.themes.THEME_BLUE)
-        menu.add.button("Diashow auswählen", select_diashow_menu)
-        menu.add.button("Exit", pygame_menu.events.EXIT)
-        menu.mainloop(self.__surface)
+    def __set_min_time_per_image(self, _: Tuple, value: Any) -> None:
+        assert isinstance(value, TimeValue)
+        self.__diashow_config.min_time_per_image = value
+
+    def __set_max_time_per_image(self, _: Tuple, value: Any) -> None:
+        assert isinstance(value, TimeValue)
+        self.__diashow_config.max_time_per_image = value
+
+    def __set_blending_time(self, _: Tuple, value: Any) -> None:
+        assert value is None or isinstance(value, TimeValue)
+        self.__diashow_config.blending_time = value
+
+    def __set_weighting_star_5(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_5 = round(value)
+
+    def __set_weighting_star_4(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_4 = round(value)
+
+    def __set_weighting_star_3(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_3 = round(value)
+
+    def __set_weighting_star_2(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_2 = round(value)
+
+    def __set_weighting_star_1(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_1 = round(value)
+
+    def __set_weighting_star_0(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.weighting.star_0 = round(value)
+
+    def __set_show_duration_in_minutes(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__diashow_config.show_duration_in_minutes = value
+
+    def create_menu(self, menu_creator: MenuCreator, menu_title: str, back_label: str) -> pygame_menu.Menu:
+        menu = menu_creator.create_menu(menu_title)
+        menu.add.selector("Minimale Standzeit pro Bild: ", TIME_VALUE_SELECTOR_LIST, onchange=self.__set_min_time_per_image) \
+            .set_value(self.__diashow_config.min_time_per_image.value.text)
+        menu.add.selector("Maximale Standzeit pro Bild: ", TIME_VALUE_SELECTOR_LIST, onchange=self.__set_max_time_per_image) \
+            .set_value(self.__diashow_config.max_time_per_image.value.text)
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.selector("Überblendzeit zwischen Bildern: ", BLENDING_TIME_VALUE_SELECTOR_LIST, onchange=self.__set_blending_time) \
+            .set_value(get_blending_time_text(self.__diashow_config.blending_time))
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.range_slider("Standzeitgewichtung für 5*-Bilder: ", float(self.__diashow_config.weighting.star_5), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_5)
+        menu.add.range_slider("Standzeitgewichtung für 4*-Bilder: ", float(self.__diashow_config.weighting.star_4), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_4)
+        menu.add.range_slider("Standzeitgewichtung für 3*-Bilder: ", float(self.__diashow_config.weighting.star_3), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_3)
+        menu.add.range_slider("Standzeitgewichtung für 2*-Bilder: ", float(self.__diashow_config.weighting.star_2), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_2)
+        menu.add.range_slider("Standzeitgewichtung für 1*-Bilder: ", float(self.__diashow_config.weighting.star_1), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_1)
+        menu.add.range_slider("Standzeitgewichtung für 0*-Bilder: ", float(self.__diashow_config.weighting.star_0), (25.0, 200.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_weighting_star_0)
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.range_slider("Gesamtdauer der Diashow: ", self.__diashow_config.show_duration_in_minutes, (1.0, 120.0), increment=0.5,
+            value_format=lambda x: f"{round(x, 1)} Minute(n)", onchange=self.__set_show_duration_in_minutes, width=250)
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.button(back_label, pygame_menu.events.BACK)
+        return menu
+
+@final
+class OptionsMenuFactory(MenuFactory):
+    def __init__(self, config: Config):
+        self.__config = config
+        self.__default_diashow_options_menu_s = DiashowOptionsMenuFactory(self.__config.default_diashow_config_s)
+        self.__default_diashow_options_menu_m = DiashowOptionsMenuFactory(self.__config.default_diashow_config_m)
+        self.__default_diashow_options_menu_l = DiashowOptionsMenuFactory(self.__config.default_diashow_config_l)
+        self.__default_diashow_options_menu_x = DiashowOptionsMenuFactory(self.__config.default_diashow_config_x)
+
+    def __set_max_image_count_for_s(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__config.max_image_count_for_s = round(value)
+
+    def __set_max_image_count_for_m(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__config.max_image_count_for_m = round(value)
+
+    def __set_max_image_count_for_l(self, value: Any) -> None:
+        assert isinstance(value, float)
+        self.__config.max_image_count_for_l = round(value)
+
+    def create_menu(self, menu_creator: MenuCreator, menu_title: str, back_label: str) -> pygame_menu.Menu:
+        default_diashow_config_s_label = "Standard-Einstellungen für kleine Diashows"
+        default_diashow_config_m_label = "Standard-Einstellungen für mittelgroße Diashows"
+        default_diashow_config_l_label = "Standard-Einstellungen für große Diashows"
+        default_diashow_config_x_label = "Standard-Einstellungen für sehr große Diashows"
+        menu = menu_creator.create_menu(menu_title)
+        menu.add.range_slider("Maximale Anzahl Bilder für kleine Diashows: ", self.__config.max_image_count_for_s, (10.0, 125.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_max_image_count_for_s)
+        menu.add.range_slider("Maximale Anzahl Bilder für mittelgroße Diashows: ", self.__config.max_image_count_for_m, (75.0, 250.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_max_image_count_for_m)
+        menu.add.range_slider("Maximale Anzahl Bilder für große Diashows: ", self.__config.max_image_count_for_l, (125.0, 500.0), increment=5.0,
+            value_format=lambda x: str(round(x)), onchange=self.__set_max_image_count_for_l)
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.button(default_diashow_config_s_label, self.__default_diashow_options_menu_s.create_menu(
+            menu_creator=menu_creator,
+            menu_title=default_diashow_config_s_label,
+            back_label=back_label,
+        ))
+        menu.add.button(default_diashow_config_m_label, self.__default_diashow_options_menu_m.create_menu(
+            menu_creator=menu_creator,
+            menu_title=default_diashow_config_m_label,
+            back_label=back_label,
+        ))
+        menu.add.button(default_diashow_config_l_label, self.__default_diashow_options_menu_l.create_menu(
+            menu_creator=menu_creator,
+            menu_title=default_diashow_config_l_label,
+            back_label=back_label,
+        ))
+        menu.add.button(default_diashow_config_x_label, self.__default_diashow_options_menu_x.create_menu(
+            menu_creator=menu_creator,
+            menu_title=default_diashow_config_x_label,
+            back_label=back_label,
+        ))
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.button(back_label, pygame_menu.events.BACK)
+        return menu
+
+@final
+class MainMenu:
+    DIASHOW_PLAY_MODE = "SHOW"
+    SAVE_CONFIG_MODE = "SAVE"
+    EXIT_MODE = "EXIT"
+
+    def __init__(self, menu: pygame_menu.Menu):
+        self.__menu = menu
+        self.__play_mode: Optional[str] = None
+        self.__show: Optional[DiashowNode] = None
+
+    def enable_diashow(self, show: DiashowNode):
+        self.__menu.disable()
+        self.__play_mode = self.DIASHOW_PLAY_MODE
+        self.__show = show
+
+    def enable_save_options(self):
+        self.__menu.disable()
+        self.__play_mode = self.SAVE_CONFIG_MODE
+        self.__show = None
+
+    def enable_exit(self):
+        self.__menu.disable()
+        self.__play_mode = self.EXIT_MODE
+        self.__show = None
+
+    def get_play_mode(self) -> str:
+        assert self.__play_mode is not None
+        return self.__play_mode
+
+    def get_show(self) -> DiashowNode:
+        assert self.__show is not None
+        return self.__show
+
+    def run(self, surface: pygame.Surface) -> str:
+        self.__play_mode = None
+        self.__show = None
+        self.__menu.enable()
+        self.__menu.mainloop(surface, fps_limit=FPS)
+        if self.__play_mode is None:
+            return ""
+        else:
+            return self.__play_mode
+
+@final
+class DiashowMenuFactory(MenuFactory):
+    def __init__(self, main_menu: MainMenu, node: DiashowNode, hierachy: List[DiashowNode]):
+        self.__main_menu = main_menu
+        self.__node = node
+        self.__hierachy = hierachy
+
+    def create_menu(self, menu_creator: MenuCreator, menu_title: str, back_label: str) -> pygame_menu.Menu:
+        menu = menu_creator.create_menu(menu_title)
+        if len(self.__hierachy) > 0:
+            for hierachy_node in self.__hierachy:
+                menu.add.label(hierachy_node.nodename)
+            menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        if len(self.__node.images) > 0:
+            menu.add.button("Start", lambda: self.__main_menu.enable_diashow(self.__node))
+            menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        if len(self.__node.child_nodes) > 0:
+            for child_node in self.__node.child_nodes:
+                child_diashow_menu_factory = DiashowMenuFactory(
+                    main_menu=self.__main_menu,
+                    node=child_node,
+                    hierachy=self.__hierachy + [child_node],
+                )
+                menu.add.button(child_node.nodename, child_diashow_menu_factory.create_menu(
+                    menu_creator=menu_creator,
+                    menu_title=menu_title,
+                    back_label=back_label,
+                ))
+            menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.button(back_label, pygame_menu.events.BACK)
+        return menu
+
+@final
+class MainMenuCreator:
+    def __init__(self, main_node: DiashowNode, config: Config):
+        self.__main_node = main_node
+        self.__options_menu_factory = OptionsMenuFactory(config)
+
+    def create_main(self, menu_creator: MenuCreator) -> MainMenu:
+        select_diashow_label = "Diashow auswählen"
+        change_options_label = "Optionen anpassen"
+        save_options_label = "Optionen speichern"
+        back_label = "Zurück"
+        menu = menu_creator.create_menu("Diashow")
+        main_menu = MainMenu(menu)
+        menu.add.button(select_diashow_label, DiashowMenuFactory(main_menu=main_menu, node=self.__main_node, hierachy=[]).create_menu(
+            menu_creator=menu_creator,
+            menu_title=select_diashow_label,
+            back_label=back_label,
+        ))
+        menu.add.button(change_options_label, self.__options_menu_factory.create_menu(
+            menu_creator=menu_creator,
+            menu_title=change_options_label,
+            back_label=back_label,
+        ))
+        menu.add.button(save_options_label, main_menu.enable_save_options)
+        menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
+        menu.add.button("Verlassen", main_menu.enable_exit)
+        return main_menu
 
 #-------------------------------------------------------------------------------
 
 def main():
+    # read Diashow nodes
     assert os.path.exists(DIASHOW_FOLDER)
-    nodes = Diashow(DIASHOW_FOLDER).read()
-    print_diashow_nodes(nodes)
+    main_node = Diashow(DIASHOW_FOLDER).read()
+    print_diashow_nodes(main_node)
 
+    # read configuration
     config = create_default_config()
 
-    # TEST
-    test_images = nodes.child_nodes[0].child_nodes[0].images
-    calculator = DiashowCalculator(test_images)
-    timing = calculator.calc(config.default_diashow_config_s)
-    print()
-    print(timing)
-
-
-    #pygame.init()
-    #surface = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    #diashow = Diashow(surface)
-    #diashow.main()
+    # start Diashow menu
+    pygame.init()
+    try:
+        surface = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        main_menu = MainMenuCreator(main_node=main_node, config=config).create_main(MenuCreator(surface))
+        while True:
+            play_mode = main_menu.run(surface)
+            if play_mode == MainMenu.DIASHOW_PLAY_MODE:
+                print(f"SHOW: {main_menu.get_show().nodename}")  # TODO
+                continue
+            if play_mode == MainMenu.SAVE_CONFIG_MODE:
+                print("SAVE")  # TODO
+                continue
+            if play_mode == MainMenu.EXIT_MODE:
+                print()
+                print("Bye bye :-) !!!")
+                break
+    finally:
+        pygame.quit()
 
 #-------------------------------------------------------------------------------
 
