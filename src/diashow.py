@@ -1025,6 +1025,10 @@ class DiashowTimelineFactory:
 
 class DiashowController(ABC):
     @abstractmethod
+    def set_pause(self, pause: bool) -> None:
+        pass
+
+    @abstractmethod
     def goto_prev_image(self) -> None:
         pass
 
@@ -1043,17 +1047,36 @@ class DiashowController(ABC):
 @final
 class InDiashowMenu:
     MENU_SHOW_DURATION_IN_SECONDS = 2.0
+    MODE_TEXT_0 = "Wiedergabe"
+    MODE_TEXT_1 = "Pause"
 
-    def __init__(self, menu_creator: MenuCreator, diashow_controller: DiashowController):
+    def __init__(self, menu_creator: MenuCreator, diashow_controller: DiashowController, initial_pause: bool, initial_speed: float):
         self.__surface = menu_creator.get_surface()
         self.__end_time_in_seconds = 0.0
 
+        # get initial mode text
+        if initial_pause:
+            initial_mode_text = self.MODE_TEXT_1
+        else:
+            initial_mode_text = self.MODE_TEXT_0
+
         # create menu
-        self.__menu = menu_creator.create_menu("Diashow", height=400, width=800, theme_nr=2)
+        def set_pause(_: Tuple, value: Any) -> None:
+            assert isinstance(value, bool)
+            diashow_controller.set_pause(value)
+        self.__menu = menu_creator.create_menu(
+            menu_title="Diashow",
+            height=round(float(self.__surface.get_height()) * 0.5),
+            width=round(float(self.__surface.get_width()) * 0.5),
+            theme_nr=2,
+        )
+        self.__menu.add.selector("Modus: ", [(self.MODE_TEXT_0, False), (self.MODE_TEXT_1, True)], onchange=set_pause) \
+            .set_value(initial_mode_text)
         self.__menu.add.button("Bild zurück", diashow_controller.goto_prev_image)
-        self.__menu.add.button("Bild vor", diashow_controller.goto_next_image)
-        self.__menu.add.range_slider("Geschwindigkeit: ", 1.0, (0.25, 5.0), increment=0.25,
+        self.__menu.add.button("Bild weiter", diashow_controller.goto_next_image)
+        self.__menu.add.range_slider("Geschwindigkeit: ", initial_speed, (0.25, 5.0), increment=0.25,
             value_format=lambda x: str(round(x, 2)) + "x", onchange=diashow_controller.set_speed)
+        self.__menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         self.__menu.add.button("Verlassen", diashow_controller.cancel)
         self.__menu.disable()
 
@@ -1071,18 +1094,55 @@ class InDiashowMenu:
 
 @final
 class DiashowPlayer(DiashowController):
+    MENU_WAITING_TIME_IN_SECONDS = 0.5
+
     def __init__(self, play_node: DiashowNode, timing: DiashowTiming, menu_creator: MenuCreator):
         self.__play_node = play_node
         self.__timing = timing
         self.__menu_creator = menu_creator
         self.__speed = 1.0
+        self.__pause = False
         self.__run = True
+        self.__diashow_timeline: Optional[List[Tuple[float, DiashowSegment]]] = None
+        self.__diashow_timeline_index = -1
+        self.__diashow_start_time = 0.0
+
+    def set_pause(self, pause: bool) -> None:
+        self.__pause = pause
 
     def goto_prev_image(self) -> None:
-        pass  # TODO
+        if self.__diashow_timeline is not None:
+            segment_time = get_current_time_since_epoch_in_seconds() - self.__diashow_start_time
+            new_diashow_timeline_index = self.__diashow_timeline_index
+            while True:
+                new_diashow_timeline_index -= 1
+                if new_diashow_timeline_index < 0:
+                    return
+                new_time, new_segment = self.__diashow_timeline[new_diashow_timeline_index]
+                if isinstance(new_segment, FixedDiashowSegment):
+                    break
+            new_start_time_offset = segment_time - new_time
+            assert new_start_time_offset >= 0.0
+            self.__diashow_timeline_index = new_diashow_timeline_index
+            self.__diashow_start_time += new_start_time_offset
+            new_segment.start()
 
     def goto_next_image(self) -> None:
-        pass  # TODO
+        if self.__diashow_timeline is not None:
+            segment_time = get_current_time_since_epoch_in_seconds() - self.__diashow_start_time
+            new_diashow_timeline_index = self.__diashow_timeline_index
+            while True:
+                new_diashow_timeline_index += 1
+                if new_diashow_timeline_index >= len(self.__diashow_timeline) - 1:
+                    return
+                new_time, new_segment = self.__diashow_timeline[new_diashow_timeline_index]
+                if isinstance(new_segment, FixedDiashowSegment):
+                    break
+            new_start_time_offset = new_time - segment_time
+            assert new_start_time_offset >= 0.0
+            self.__diashow_timeline_index = new_diashow_timeline_index
+            self.__diashow_start_time -= new_start_time_offset
+            new_segment.start()
 
     def set_speed(self, speed: Any) -> None:
         self.__speed = speed
@@ -1100,38 +1160,53 @@ class DiashowPlayer(DiashowController):
         # prepare diashow
         image_loader = ImageLoader(surface, self.__play_node.images)
         timeline_factory = DiashowTimelineFactory(self.__timing, image_loader)
-        timeline = timeline_factory.create_timeline(self.__play_node.images)
-        assert len(timeline) > 0
-        assert isinstance(timeline[-1][1], StopDiashowSegment)
-        timeline[0][1].start()
-        menu = InDiashowMenu(menu_creator=self.__menu_creator, diashow_controller=self)
+        self.__diashow_timeline = timeline_factory.create_timeline(self.__play_node.images)
+        assert self.__diashow_timeline is not None
+        assert len(self.__diashow_timeline) > 0
+        assert isinstance(self.__diashow_timeline[-1][1], StopDiashowSegment)
+        self.__diashow_timeline[0][1].start()
+        menu = InDiashowMenu(
+            menu_creator=self.__menu_creator,
+            diashow_controller=self,
+            initial_pause=self.__pause,
+            initial_speed=self.__speed,
+        )
 
         # start diashow
-        timeline_index = 0
-        start_time = get_current_time_since_epoch_in_seconds()
+        self.__diashow_timeline_index = 0
+        self.__diashow_start_time = get_current_time_since_epoch_in_seconds()
+        real_diashow_start_time = self.__diashow_start_time
+        previous_time = self.__diashow_start_time
+        consider_menu = False
         while self.__run:
             # try to disable mouse visibility
             pygame.mouse.set_visible(False)
 
-            # save current time
+            # get current time and update start time if we are in pause mode
             current_time = get_current_time_since_epoch_in_seconds()
+            if self.__pause:
+                self.__diashow_start_time += current_time - previous_time
+            previous_time = current_time
 
-            # check events
+            # get events and show menu
             events = pygame.event.get()
-            if events:
-                menu.show_menu(current_time)
+            if consider_menu:
+                if events:
+                    menu.show_menu(current_time)
+            elif (current_time - real_diashow_start_time) >= self.MENU_WAITING_TIME_IN_SECONDS:
+                consider_menu = True
 
             # calculate timeline
-            segment_time = current_time - start_time
-            next_time, next_segment = timeline[timeline_index + 1]
+            segment_time = current_time - self.__diashow_start_time
+            next_time, next_segment = self.__diashow_timeline[self.__diashow_timeline_index + 1]
             index_changed = False
             if segment_time >= next_time:
                 if isinstance(next_segment, StopDiashowSegment):
                     break
-                timeline_index += 1
+                self.__diashow_timeline_index += 1
                 index_changed = True
                 next_segment.start()
-            actual_time, actual_segment = timeline[timeline_index]
+            actual_time, actual_segment = self.__diashow_timeline[self.__diashow_timeline_index]
             actual_segment_time = segment_time - actual_time
 
             # update screen
