@@ -34,7 +34,7 @@ def get_current_time_since_epoch_in_seconds() -> float:
 
 #-------------------------------------------------------------------------------
 
-DIASHOW_FOLDER = "/media/sf_Exchange/Diashow/"
+DIASHOW_FOLDER = "/Volumes/Daten/Pictures/Diashows/01 - Mach mal Urlaub/2022 - Bulgarien; Sonnenstrand [290]/"  # TODO
 
 FILENAME_TAG = "SourceFile"
 RATING_TAG = "XMP:Rating"
@@ -99,6 +99,8 @@ class DiashowReader:
         node.child_nodes.sort()
 
     def __read_sorted_images(self, node: DiashowNode) -> None:
+        print(f"Reading folder: {node.folder}")
+
         # read all files from folder
         filename_list: List[str] = []
         for filename in os.listdir(node.folder):
@@ -800,13 +802,6 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
 
 #-------------------------------------------------------------------------------
 
-def blit_image_helper(surface: pygame.Surface, image: pygame.Surface)-> None:
-    y_pos = (surface.get_height() - image.get_height()) // 2
-    x_pos = (surface.get_width() - image.get_width()) // 2
-    surface.blit(image, (x_pos, y_pos))
-
-#-------------------------------------------------------------------------------
-
 class DiashowSegment(ABC):
     @abstractmethod
     def get_lifetime_in_seconds(self) -> float:
@@ -823,31 +818,37 @@ class DiashowSegment(ABC):
 @final
 class ImageLoader:
     def __init__(self, surface: pygame.Surface):
-        self.__surface = surface
-        self.__image0: Optional[pygame.Surface] = None
+        self.__height = surface.get_height()
+        self.__width = surface.get_width()
+        self.__image0 = pygame.Surface(surface.get_size(), flags=pygame.SRCALPHA)
         self.__image0_index: Optional[int] = None
-        self.__image1: Optional[pygame.Surface] = None
+        self.__image1 = pygame.Surface(surface.get_size(), flags=pygame.SRCALPHA)
         self.__image1_index: Optional[int] = None
 
     def __scale_image(self, image: pygame.Surface) -> pygame.Surface:
-        if image.get_height() == self.__surface.get_height() and image.get_width() <= self.__surface.get_width():
+        image_height = image.get_height()
+        image_width = image.get_width()
+        if image_height == self.__height and image_width <= self.__width:
             return image  # no re-scale
-        elif image.get_width() == self.__surface.get_width() and image.get_height() <= self.__surface.get_height():
+        elif image_width == self.__width and image_height <= self.__height:
             return image  # no re-scale
         else:
-            surface_height_f = float(self.__surface.get_height())
-            surface_width_f = float(self.__surface.get_width())
-            image_height_f = float(image.get_height())
-            image_width_f = float(image.get_width())
-            surface_ratio = surface_width_f / surface_height_f
-            image_ration = image_width_f / image_height_f
-            if image_ration <= surface_ratio:
-                new_image_height = self.__surface.get_height()
-                new_image_width = round(surface_height_f / image_height_f * image_width_f)
+            target_ratio = float(self.__width) / float(self.__height)
+            source_ratio = float(image_width) / float(image_height)
+            if source_ratio <= target_ratio:
+                new_image_height = self.__height
+                new_image_width = self.__height * image_width // image_height
             else:
-                new_image_height = round(surface_width_f / image_width_f * image_height_f)
-                new_image_width = self.__surface.get_width()
-            return pygame.transform.scale(image, (new_image_width, new_image_height))
+                new_image_height = self.__width * image_height // image_width
+                new_image_width = self.__width
+            return pygame.transform.smoothscale(image, (new_image_width, new_image_height))
+
+    def __fill_image(self, target: pygame.Surface, source: Optional[pygame.Surface]):
+        target.fill((0, 0, 0))
+        if source is not None:
+            y_pos = (self.__height - source.get_height()) // 2
+            x_pos = (self.__width - source.get_width()) // 2
+            target.blit(source, (x_pos, y_pos))
 
     def __check_negative_index(self, images: List[DiashowImage], index: int) -> int:
         if index < 0:
@@ -872,11 +873,11 @@ class ImageLoader:
 
         # set image
         if index % 2 == 0:
+            self.__fill_image(self.__image0, image)
             self.__image0_index = index
-            self.__image0 = image
         else:
+            self.__fill_image(self.__image1, image)
             self.__image1_index = index
-            self.__image1 = image
 
     def get_image(self, images: List[DiashowImage], index: int) -> Optional[pygame.Surface]:
         index = self.__check_negative_index(images, index)
@@ -912,7 +913,7 @@ class StartDiashowSegment(DiashowSegment):
             image.set_alpha(255)
         else:
             image.set_alpha(round(255.0 * fade_factor))
-        blit_image_helper(surface, image)
+        surface.blit(image, (0, 0))
 
 @final
 class EndDiashowSegment(DiashowSegment):
@@ -937,7 +938,7 @@ class EndDiashowSegment(DiashowSegment):
             image = self.__loader.get_image(self.__images, -1)
             assert image is not None
             image.set_alpha(round(255.0 * fade_factor))
-            blit_image_helper(surface, image)
+            surface.blit(image, (0, 0))
 
 @final
 class CrossFadeDiashowSegment(DiashowSegment):
@@ -964,14 +965,14 @@ class CrossFadeDiashowSegment(DiashowSegment):
         prev_image = self.__loader.get_image(self.__images, self.__prev_index)
         assert prev_image is not None
         prev_image.set_alpha(255)
-        blit_image_helper(surface, prev_image)
+        surface.blit(prev_image, (0, 0))
         next_image = self.__loader.get_image(self.__images, self.__next_index)
         assert next_image is not None
         if fade_factor >= 1.0:
             next_image.set_alpha(255)
         else:
             next_image.set_alpha(round(255.0 * fade_factor))
-        blit_image_helper(surface, next_image)
+        surface.blit(next_image, (0, 0))
 
 @final
 class FixedDiashowSegment(DiashowSegment):
@@ -1009,7 +1010,7 @@ class FixedDiashowSegment(DiashowSegment):
         image = self.__loader.get_image(self.__images, self.__index)
         assert image is not None
         image.set_alpha(255)
-        blit_image_helper(surface, image)
+        surface.blit(image, (0, 0))
 
 @final
 class StopDiashowSegment(DiashowSegment):
