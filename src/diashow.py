@@ -794,7 +794,7 @@ class DiashowSegment(ABC):
         pass
 
     @abstractmethod
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         pass
 
 @final
@@ -868,19 +868,19 @@ class ImageLoader:
 @final
 class StartDiashowSegment(DiashowSegment):
     def __init__(self, timing: DiashowTiming, loader: ImageLoader):
-        self.__timing = timing
+        self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
 
     def get_lifetime_in_seconds(self) -> float:
-        return self.__timing.blending_time_in_seconds
+        return self.__blending_time_in_seconds
 
     def start(self) -> None:
         self.__loader.load_image(0)
 
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
-        if self.__timing.blending_time_in_seconds > 0.0:
-            fade_factor = time_in_seconds / self.__timing.blending_time_in_seconds
+        if self.__blending_time_in_seconds > 0.0:
+            fade_factor = time_in_seconds / self.__blending_time_in_seconds * speed
         else:
             fade_factor = 1.0
         image = self.__loader.get_image(0)
@@ -894,19 +894,19 @@ class StartDiashowSegment(DiashowSegment):
 @final
 class EndDiashowSegment(DiashowSegment):
     def __init__(self, timing: DiashowTiming, loader: ImageLoader):
-        self.__timing = timing
+        self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
 
     def get_lifetime_in_seconds(self) -> float:
-        return self.__timing.blending_time_in_seconds
+        return self.__blending_time_in_seconds
 
     def start(self) -> None:
         self.__loader.load_image(-1)
 
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
-        if self.__timing.blending_time_in_seconds > 0.0:
-            fade_factor = 1.0 - time_in_seconds / self.__timing.blending_time_in_seconds
+        if self.__blending_time_in_seconds > 0.0:
+            fade_factor = 1.0 - time_in_seconds / self.__blending_time_in_seconds * speed
         else:
             fade_factor = 0.0
         if fade_factor > 0.0:
@@ -918,22 +918,22 @@ class EndDiashowSegment(DiashowSegment):
 @final
 class CrossFadeDiashowSegment(DiashowSegment):
     def __init__(self, timing: DiashowTiming, loader: ImageLoader, prev_index: int, next_index: int):
-        self.__timing = timing
+        self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
         self.__prev_index = prev_index
         self.__next_index = next_index
 
     def get_lifetime_in_seconds(self) -> float:
-        return self.__timing.blending_time_in_seconds
+        return self.__blending_time_in_seconds
 
     def start(self) -> None:
         self.__loader.load_image(self.__prev_index)
         self.__loader.load_image(self.__next_index)
 
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
-        if self.__timing.blending_time_in_seconds > 0.0:
-            fade_factor = time_in_seconds / self.__timing.blending_time_in_seconds
+        if self.__blending_time_in_seconds > 0.0:
+            fade_factor = time_in_seconds / self.__blending_time_in_seconds * speed
         else:
             fade_factor = 1.0
         prev_image = self.__loader.get_image(self.__prev_index)
@@ -978,7 +978,7 @@ class FixedDiashowSegment(DiashowSegment):
         if self.__index >= 0:
             self.__loader.load_image(self.__index + 1)  # pre-load next image
 
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
         image = self.__loader.get_image(self.__index)
         assert image is not None
@@ -993,8 +993,21 @@ class StopDiashowSegment(DiashowSegment):
     def start(self) -> None:
         pass
 
-    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+    def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         pass
+
+@dataclass
+@final
+class DiashowTimelineSegment:
+    _start_time_in_seconds: float
+    _end_time_in_seconds: float
+    segment: DiashowSegment
+
+    def get_start_time(self, speed: float) -> float:
+        return self._start_time_in_seconds / speed
+
+    def get_end_time(self, speed: float) -> float:
+        return self._end_time_in_seconds / speed
 
 @final
 class DiashowTimelineFactory:
@@ -1003,16 +1016,19 @@ class DiashowTimelineFactory:
         self.__loader = loader
 
     @staticmethod
-    def __add_to_timeline(timeline: List[Tuple[float, DiashowSegment]], next_segment: DiashowSegment) -> None:
+    def __add_to_timeline(timeline: List[DiashowTimelineSegment], next_segment: DiashowSegment) -> None:
         if len(timeline) > 0:
-            last_time, last_segment = timeline[-1]
-            next_time = last_time + last_segment.get_lifetime_in_seconds()
+            next_time = timeline[-1].get_end_time(speed=1.0)
         else:
             next_time = 0.0
-        timeline.append((next_time, next_segment))
+        timeline.append(DiashowTimelineSegment(
+            _start_time_in_seconds=next_time,
+            _end_time_in_seconds=next_time + next_segment.get_lifetime_in_seconds(),
+            segment=next_segment,
+        ))
 
-    def create_timeline(self, images: List[DiashowImage]) -> List[Tuple[float, DiashowSegment]]:
-        timeline: List[Tuple[float, DiashowSegment]] = []
+    def create_timeline(self, images: List[DiashowImage]) -> List[DiashowTimelineSegment]:
+        timeline: List[DiashowTimelineSegment] = []
         if len(images) > 0:
             self.__add_to_timeline(timeline, StartDiashowSegment(self.__timing, self.__loader))
             for index, image in enumerate(images[:-1]):
@@ -1074,8 +1090,8 @@ class InDiashowMenu:
             .set_value(initial_mode_text)
         self.__menu.add.button("Bild zurück", diashow_controller.goto_prev_image)
         self.__menu.add.button("Bild weiter", diashow_controller.goto_next_image)
-        self.__menu.add.range_slider("Geschwindigkeit: ", initial_speed, (0.25, 5.0), increment=0.25,
-            value_format=lambda x: str(round(x, 2)) + "x", onchange=diashow_controller.set_speed)
+        self.__menu.add.range_slider("Geschwindigkeit: ", initial_speed, (0.1, 5.0), increment=0.1,
+            value_format=lambda x: str(round(x, 1)) + "x", onchange=diashow_controller.set_speed)
         self.__menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         self.__menu.add.button("Verlassen", diashow_controller.cancel)
         self.__menu.disable()
@@ -1103,48 +1119,66 @@ class DiashowPlayer(DiashowController):
         self.__speed = 1.0
         self.__pause = False
         self.__run = True
-        self.__diashow_timeline: Optional[List[Tuple[float, DiashowSegment]]] = None
+        self.__diashow_timeline: Optional[List[DiashowTimelineSegment]] = None
         self.__diashow_timeline_index = -1
         self.__diashow_start_time = 0.0
+        self.__diashow_current_time = 0.0
 
     def set_pause(self, pause: bool) -> None:
         self.__pause = pause
 
     def goto_prev_image(self) -> None:
         if self.__diashow_timeline is not None:
-            segment_time = get_current_time_since_epoch_in_seconds() - self.__diashow_start_time
+            segment_time = self.__diashow_current_time - self.__diashow_start_time
             new_diashow_timeline_index = self.__diashow_timeline_index
             while True:
                 new_diashow_timeline_index -= 1
                 if new_diashow_timeline_index < 0:
                     return
-                new_time, new_segment = self.__diashow_timeline[new_diashow_timeline_index]
-                if isinstance(new_segment, FixedDiashowSegment):
+                new_timeline_segment = self.__diashow_timeline[new_diashow_timeline_index]
+                if isinstance(new_timeline_segment.segment, FixedDiashowSegment):
                     break
-            new_start_time_offset = segment_time - new_time
+            new_start_time_offset = segment_time - new_timeline_segment.get_start_time(self.__speed)
             assert new_start_time_offset >= 0.0
             self.__diashow_timeline_index = new_diashow_timeline_index
             self.__diashow_start_time += new_start_time_offset
-            new_segment.start()
+            new_timeline_segment.segment.start()
 
     def goto_next_image(self) -> None:
         if self.__diashow_timeline is not None:
-            segment_time = get_current_time_since_epoch_in_seconds() - self.__diashow_start_time
+            segment_time = self.__diashow_current_time - self.__diashow_start_time
             new_diashow_timeline_index = self.__diashow_timeline_index
             while True:
                 new_diashow_timeline_index += 1
                 if new_diashow_timeline_index >= len(self.__diashow_timeline) - 1:
                     return
-                new_time, new_segment = self.__diashow_timeline[new_diashow_timeline_index]
-                if isinstance(new_segment, FixedDiashowSegment):
+                new_timeline_segment = self.__diashow_timeline[new_diashow_timeline_index]
+                if isinstance(new_timeline_segment.segment, FixedDiashowSegment):
                     break
-            new_start_time_offset = new_time - segment_time
+            new_start_time_offset = new_timeline_segment.get_start_time(self.__speed) - segment_time
             assert new_start_time_offset >= 0.0
             self.__diashow_timeline_index = new_diashow_timeline_index
             self.__diashow_start_time -= new_start_time_offset
-            new_segment.start()
+            new_timeline_segment.segment.start()
 
     def set_speed(self, speed: Any) -> None:
+        assert isinstance(speed, float)
+        if self.__diashow_timeline is not None:
+            segment_time = self.__diashow_current_time - self.__diashow_start_time
+            actual_timeline_segment = self.__diashow_timeline[self.__diashow_timeline_index]
+            old_segment_start_time = actual_timeline_segment.get_start_time(self.__speed)
+            old_segment_end_time = actual_timeline_segment.get_end_time(self.__speed)
+            old_segment_time_diff = old_segment_end_time - old_segment_start_time
+            if old_segment_time_diff > 0.0:
+                segment_time_ratio = (segment_time - old_segment_start_time) / old_segment_time_diff
+            else:
+                segment_time_ratio = 0.0
+            new_segment_start_time = actual_timeline_segment.get_start_time(speed)
+            new_segment_end_time = actual_timeline_segment.get_end_time(speed)
+            new_segment_time_diff = new_segment_end_time - new_segment_start_time
+            new_current_time = new_segment_time_diff * segment_time_ratio + new_segment_start_time
+            time_diff = new_current_time - segment_time
+            self.__diashow_start_time -= time_diff
         self.__speed = speed
 
     def cancel(self) -> None:
@@ -1163,8 +1197,8 @@ class DiashowPlayer(DiashowController):
         self.__diashow_timeline = timeline_factory.create_timeline(self.__play_node.images)
         assert self.__diashow_timeline is not None
         assert len(self.__diashow_timeline) > 0
-        assert isinstance(self.__diashow_timeline[-1][1], StopDiashowSegment)
-        self.__diashow_timeline[0][1].start()
+        assert isinstance(self.__diashow_timeline[-1].segment, StopDiashowSegment)
+        self.__diashow_timeline[0].segment.start()
         menu = InDiashowMenu(
             menu_creator=self.__menu_creator,
             diashow_controller=self,
@@ -1183,35 +1217,35 @@ class DiashowPlayer(DiashowController):
             pygame.mouse.set_visible(False)
 
             # get current time and update start time if we are in pause mode
-            current_time = get_current_time_since_epoch_in_seconds()
+            self.__diashow_current_time = get_current_time_since_epoch_in_seconds()
             if self.__pause:
-                self.__diashow_start_time += current_time - previous_time
-            previous_time = current_time
+                self.__diashow_start_time += self.__diashow_current_time - previous_time
+            previous_time = self.__diashow_current_time
 
             # get events and show menu
             events = pygame.event.get()
             if consider_menu:
                 if events:
-                    menu.show_menu(current_time)
-            elif (current_time - real_diashow_start_time) >= self.MENU_WAITING_TIME_IN_SECONDS:
+                    menu.show_menu(self.__diashow_current_time)
+            elif (self.__diashow_current_time - real_diashow_start_time) >= self.MENU_WAITING_TIME_IN_SECONDS:
                 consider_menu = True
 
             # calculate timeline
-            segment_time = current_time - self.__diashow_start_time
-            next_time, next_segment = self.__diashow_timeline[self.__diashow_timeline_index + 1]
+            segment_time = self.__diashow_current_time - self.__diashow_start_time
+            next_timeline_segment = self.__diashow_timeline[self.__diashow_timeline_index + 1]
             index_changed = False
-            if segment_time >= next_time:
-                if isinstance(next_segment, StopDiashowSegment):
+            if segment_time >= next_timeline_segment.get_start_time(self.__speed):
+                if isinstance(next_timeline_segment.segment, StopDiashowSegment):
                     break
                 self.__diashow_timeline_index += 1
                 index_changed = True
-                next_segment.start()
-            actual_time, actual_segment = self.__diashow_timeline[self.__diashow_timeline_index]
-            actual_segment_time = segment_time - actual_time
+                next_timeline_segment.segment.start()
+            actual_timeline_segment = self.__diashow_timeline[self.__diashow_timeline_index]
+            actual_segment_time = segment_time - actual_timeline_segment.get_start_time(self.__speed)
 
             # update screen
-            actual_segment.update(surface, actual_segment_time)
-            menu.update(current_time, events)
+            actual_timeline_segment.segment.update(surface, actual_segment_time, self.__speed)
+            menu.update(self.__diashow_current_time, events)
             pygame.display.flip()
             if not index_changed:
                 clock.tick(FPS)
