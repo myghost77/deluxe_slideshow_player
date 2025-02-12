@@ -21,9 +21,15 @@ from enum import Enum
 from abc import ABC, abstractmethod
 
 import os
+import time
 import pygame
 import pygame_menu
 import exiftool
+
+#-------------------------------------------------------------------------------
+
+def get_current_time_since_epoch_in_seconds() -> float:
+    return time.time()
 
 #-------------------------------------------------------------------------------
 
@@ -73,7 +79,7 @@ def print_diashow_nodes(node: DiashowNode, level: int = 0) -> None:
         print_diashow_nodes(child, level + 1)
 
 @final
-class Diashow:
+class DiashowReader:
     def __init__(self, main_folder: str):
         self.__main_folder = main_folder
 
@@ -320,10 +326,6 @@ class DiashowCalculator:
         )
         show_duration_in_seconds = diashow_config.show_duration_in_minutes * 60.0
         show_duration_in_seconds_per_weight = show_duration_in_seconds / weighting_sum
-        if diashow_config.blending_time is None:
-            blending_time_in_seconds = 0.0
-        else:
-            blending_time_in_seconds = diashow_config.blending_time.value.seconds
         timing = DiashowTiming(
             star_5_image_duration_in_seconds=self.__calc_image_duration(diashow_config, show_duration_in_seconds_per_weight, diashow_config.weighting.star_5),
             star_4_image_duration_in_seconds=self.__calc_image_duration(diashow_config, show_duration_in_seconds_per_weight, diashow_config.weighting.star_4),
@@ -331,9 +333,24 @@ class DiashowCalculator:
             star_2_image_duration_in_seconds=self.__calc_image_duration(diashow_config, show_duration_in_seconds_per_weight, diashow_config.weighting.star_2),
             star_1_image_duration_in_seconds=self.__calc_image_duration(diashow_config, show_duration_in_seconds_per_weight, diashow_config.weighting.star_1),
             star_0_image_duration_in_seconds=self.__calc_image_duration(diashow_config, show_duration_in_seconds_per_weight, diashow_config.weighting.star_0),
-            blending_time_in_seconds=blending_time_in_seconds,
+            blending_time_in_seconds=0.0,
             show_duration_in_minutes=0.0,
         )
+        if diashow_config.blending_time is not None:
+            min_image_duration = min(
+                timing.star_5_image_duration_in_seconds,
+                timing.star_4_image_duration_in_seconds,
+                timing.star_3_image_duration_in_seconds,
+                timing.star_2_image_duration_in_seconds,
+                timing.star_1_image_duration_in_seconds,
+                timing.star_0_image_duration_in_seconds,
+            )
+            max_blending_time_in_seconds = min_image_duration / 3.0
+            act_blending_time_in_seconds = diashow_config.blending_time.value.seconds
+            if act_blending_time_in_seconds > max_blending_time_in_seconds:
+                timing.blending_time_in_seconds = max_blending_time_in_seconds
+            else:
+                timing.blending_time_in_seconds = act_blending_time_in_seconds
         actual_duration_in_seconds = \
             float(self.__5_star_cnt) * timing.star_5_image_duration_in_seconds + \
             float(self.__4_star_cnt) * timing.star_4_image_duration_in_seconds + \
@@ -446,7 +463,7 @@ class DiashowOptionsMenuFactory(MenuFactory):
         menu.add.selector("Maximale Standzeit pro Bild: ", TIME_VALUE_SELECTOR_LIST, onchange=self.__set_max_time_per_image) \
             .set_value(self.__diashow_config.max_time_per_image.value.text)
         menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
-        menu.add.selector("Überblendzeit: ", BLENDING_TIME_VALUE_SELECTOR_LIST, onchange=self.__set_blending_time) \
+        menu.add.selector("Geplante Überblendzeit: ", BLENDING_TIME_VALUE_SELECTOR_LIST, onchange=self.__set_blending_time) \
             .set_value(get_blending_time_text(self.__diashow_config.blending_time))
         menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         menu.add.range_slider("Standzeitgewichtung für 5*-Bilder: ", float(self.__diashow_config.weighting.star_5), (25.0, 200.0), increment=5.0,
@@ -663,10 +680,18 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
         self.__blending_time_in_seconds_label: Any = None
         self.__show_duration_in_minutes_label: Any = None
         self.__calculator = DiashowCalculator(self.__play_node.images)
+        self.__timing: Optional[DiashowTiming] = None
         self.__canceled = False
 
     def get_diashow_config(self) -> DiashowConfig:
         return self.__diashow_config
+
+    def get_play_node(self) -> DiashowNode:
+        return self.__play_node
+
+    def get_timing(self) -> DiashowTiming:
+        assert self.__timing is not None
+        return self.__timing
 
     def is_canceled(self) -> bool:
         return self.__canceled
@@ -688,7 +713,8 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
         if isinstance(self.__blending_time_in_seconds_label, pygame_menu.widgets.Label):
             self.__blending_time_in_seconds_label.set_title(f"Überblendzeit: {round(timing.blending_time_in_seconds, 2)} Sekunde(n)")
         if isinstance(self.__show_duration_in_minutes_label, pygame_menu.widgets.Label):
-            self.__show_duration_in_minutes_label.set_title(f"Wahre Gesamtzeit: {round(timing.show_duration_in_minutes, 2)} Minute(n)")
+            self.__show_duration_in_minutes_label.set_title(f"Gesamtzeit: {round(timing.show_duration_in_minutes, 2)} Minute(n)")
+        self.__timing = timing
 
     def play_diashow(self):
         self.__canceled = False
@@ -739,10 +765,135 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
 
 #-------------------------------------------------------------------------------
 
+@final
+class DiashowPlayer:
+    def __init__(self, timing: DiashowTiming, node: DiashowNode):
+        self.__timing = timing
+        self.__node = node
+        self.__image0: Optional[pygame.Surface] = None
+        self.__image1: Optional[pygame.Surface] = None
+
+    def __load_image(self, surface: pygame.Surface, index: int) -> None:
+        if index < len(self.__node.images):
+            image: Optional[pygame.Surface] = pygame.image.load(self.__node.images[index].filename).convert_alpha()
+            assert image is not None
+            if image.get_height() == surface.get_height() and image.get_width() <= surface.get_width():
+                pass  # no re-scale
+            elif image.get_width() == surface.get_width() and image.get_height() <= surface.get_height():
+                pass  # no re-scale
+            else:
+                surface_height_f = float(surface.get_height())
+                surface_width_f = float(surface.get_width())
+                image_height_f = float(image.get_height())
+                image_width_f = float(image.get_width())
+                surface_ratio = surface_width_f / surface_height_f
+                image_ration = image_width_f / image_height_f
+                if image_ration <= surface_ratio:
+                    new_image_height = surface.get_height()
+                    new_image_width = round(surface_height_f / image_height_f * image_width_f)
+                else:
+                    new_image_height = round(surface_width_f / image_width_f * image_height_f)
+                    new_image_width = surface.get_width()
+                image = pygame.transform.scale(image, (new_image_width, new_image_height))
+        else:
+            image = None
+        if index % 2 == 0:
+            self.__image0 = image
+        else:
+            self.__image1 = image
+
+    @staticmethod
+    def get_pos(surface: pygame.Surface, image: pygame.Surface)-> Tuple[int, int]:
+        y_pos = (surface.get_height() - image.get_height()) // 2
+        x_pos = (surface.get_width() - image.get_width()) // 2
+        return (x_pos, y_pos)
+
+    def start(self, surface: pygame.Surface) -> None:
+        clock = pygame.time.Clock()
+
+        # clean screen and load first image
+        surface.fill((0, 0, 0))
+        pygame.display.flip()
+        self.__load_image(surface, 0)
+
+        # start diashow
+        current_index = 0
+        loaded_index = 0
+        fade_mode = True
+        start_time = get_current_time_since_epoch_in_seconds()
+        next_time = self.__timing.blending_time_in_seconds
+        while True:
+            for event in pygame.event.get():  # TODO: Events!
+                if event.type == pygame.QUIT:
+                    break
+
+            #
+            current_time = get_current_time_since_epoch_in_seconds() - start_time
+            fade_factor = 1.0
+            if fade_mode:
+                if current_time < next_time:
+                    fade_factor = current_time / next_time
+                else:
+                    fade_mode = False
+
+                    if current_index < len(self.__node.images):
+                        rating = self.__node.images[current_index].rating
+                        if rating == 2:
+                            next_time = self.__timing.star_2_image_duration_in_seconds
+                        elif rating == 3:
+                            next_time = self.__timing.star_3_image_duration_in_seconds
+                        elif rating == 4:
+                            next_time = self.__timing.star_4_image_duration_in_seconds
+                        elif rating == 5:
+                            next_time = self.__timing.star_5_image_duration_in_seconds
+                        elif rating == 1:
+                            next_time = self.__timing.star_1_image_duration_in_seconds
+                        else:
+                            next_time = self.__timing.star_0_image_duration_in_seconds
+            else:
+                if loaded_index <= current_index:
+                    loaded_index = current_index + 1
+                    self.__load_image(surface, loaded_index)
+                else:
+                    if current_time >= next_time:
+                        current_index += 1
+                        start_time += next_time
+                        next_time = self.__timing.blending_time_in_seconds
+                        fade_factor = 0.0
+                        fade_mode = True
+
+            #
+            surface.fill((0, 0, 0))
+            if current_index % 2 == 0:
+                main_image = self.__image0
+                prev_image = self.__image1
+            else:
+                main_image = self.__image1
+                prev_image = self.__image0
+            if fade_mode:
+                if main_image is None:
+                    assert prev_image is not None
+                    prev_image.set_alpha(round(255.0 * (1.0 - fade_factor)))
+                    surface.blit(prev_image, self.get_pos(surface, prev_image))
+                elif prev_image is not None:
+                    prev_image.set_alpha(255)
+                    surface.blit(prev_image, self.get_pos(surface, prev_image))
+            elif main_image is None:
+                break
+            if main_image is not None:
+                main_image.set_alpha(round(255.0 * fade_factor))
+                surface.blit(main_image, self.get_pos(surface, main_image))
+            pygame.display.flip()
+
+            #
+            clock.tick(FPS)
+
+#-------------------------------------------------------------------------------
+
 def main():
     # read Diashow nodes
     assert os.path.exists(DIASHOW_FOLDER)
-    main_node = Diashow(DIASHOW_FOLDER).read()
+    main_node = DiashowReader(DIASHOW_FOLDER).read()
     print_diashow_nodes(main_node)
 
     # read configuration
@@ -764,9 +915,12 @@ def main():
                     hierachy=main_menu.get_hierachy(),
                 )
                 start_menu.start(menu_creator)
-                if start_menu.is_canceled():
-                    continue
-                print(f"SHOW: {start_menu.get_diashow_config()}")  # TODO
+                if not start_menu.is_canceled():
+                    player = DiashowPlayer(
+                        node=start_menu.get_play_node(),
+                        timing=start_menu.get_timing(),
+                    )
+                    player.start(surface)
                 continue
             if play_mode == MainMenu.SAVE_CONFIG_MODE:
                 print("SAVE")  # TODO
