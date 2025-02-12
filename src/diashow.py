@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 
 import os
 import time
+import random
 import pygame
 import pygame_menu
 import exiftool
@@ -665,7 +666,19 @@ class MainMenuCreator:
         return main_menu
 
 @final
+class ImageOrder(Enum):
+    FORWARD = 0
+    REVERSE = 1
+    RANDOM = 2
+
+@final
 class DiashowStartMenu(MenuFactory, MenuStarter):
+    IMAGE_ORDER_SELECTOR_VALUES = [
+        ("normal"   , ImageOrder.FORWARD),
+        ("rückwärts", ImageOrder.REVERSE),
+        ("zufällig" , ImageOrder.RANDOM ),
+    ]
+
     @staticmethod
     def create_diashow_config(config: Config, play_node: DiashowNode) -> DiashowConfig:
         image_count = len(play_node.images)
@@ -693,6 +706,7 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
         self.__show_duration_in_minutes_label: Any = None
         self.__calculator = DiashowCalculator(self.__play_node.images)
         self.__timing: Optional[DiashowTiming] = None
+        self.__image_order: ImageOrder = self.IMAGE_ORDER_SELECTOR_VALUES[0][1]
         self.__canceled = False
 
     def get_diashow_config(self) -> DiashowConfig:
@@ -704,6 +718,13 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
     def get_timing(self) -> DiashowTiming:
         assert self.__timing is not None
         return self.__timing
+
+    def __set_image_order(self, _: Tuple, value: Any) -> None:
+        assert isinstance(value, ImageOrder)
+        self.__image_order = value
+
+    def get_image_order(self) -> ImageOrder:
+        return self.__image_order
 
     def is_canceled(self) -> bool:
         return self.__canceled
@@ -754,6 +775,8 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
         self.__show_duration_in_minutes_label = menu.add.label("")
         menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         menu.add.button(play_diashow_text, self.play_diashow)
+        menu.add.selector("Bildreihenfolge: ", self.IMAGE_ORDER_SELECTOR_VALUES, onchange=self.__set_image_order) \
+            .set_value(self.IMAGE_ORDER_SELECTOR_VALUES[0][0])
         menu.add.button(adjust_options_text, DiashowOptionsMenuFactory(self.__diashow_config).create_menu(
             menu_creator=menu_creator,
             menu_title=adjust_options_text,
@@ -799,9 +822,8 @@ class DiashowSegment(ABC):
 
 @final
 class ImageLoader:
-    def __init__(self, surface: pygame.Surface, images: List[DiashowImage]):
+    def __init__(self, surface: pygame.Surface):
         self.__surface = surface
-        self.__images = images
         self.__image0: Optional[pygame.Surface] = None
         self.__image0_index: Optional[int] = None
         self.__image1: Optional[pygame.Surface] = None
@@ -827,23 +849,23 @@ class ImageLoader:
                 new_image_width = self.__surface.get_width()
             return pygame.transform.scale(image, (new_image_width, new_image_height))
 
-    def __check_negative_index(self, index: int) -> int:
+    def __check_negative_index(self, images: List[DiashowImage], index: int) -> int:
         if index < 0:
-            index = len(self.__images) + index
+            index = len(images) + index
         assert index >= 0
         return index
 
-    def load_image(self, index: int) -> None:
-        index = self.__check_negative_index(index)
+    def load_image(self, images: List[DiashowImage], index: int) -> None:
+        index = self.__check_negative_index(images, index)
 
         # check, if it is already loaded
         if index == self.__image0_index or index == self.__image1_index:
             return
 
         # read image
-        if index < len(self.__images):
+        if index < len(images):
             image: Optional[pygame.Surface] = self.__scale_image(
-                pygame.image.load(self.__images[index].filename).convert_alpha(),
+                pygame.image.load(images[index].filename).convert_alpha(),
             )
         else:
             image = None
@@ -856,8 +878,8 @@ class ImageLoader:
             self.__image1_index = index
             self.__image1 = image
 
-    def get_image(self, index: int) -> Optional[pygame.Surface]:
-        index = self.__check_negative_index(index)
+    def get_image(self, images: List[DiashowImage], index: int) -> Optional[pygame.Surface]:
+        index = self.__check_negative_index(images, index)
 
         # get image
         if index % 2 == 0:
@@ -867,15 +889,16 @@ class ImageLoader:
 
 @final
 class StartDiashowSegment(DiashowSegment):
-    def __init__(self, timing: DiashowTiming, loader: ImageLoader):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, images: List[DiashowImage]):
         self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
+        self.__images = images
 
     def get_lifetime_in_seconds(self) -> float:
         return self.__blending_time_in_seconds
 
     def start(self) -> None:
-        self.__loader.load_image(0)
+        self.__loader.load_image(self.__images, 0)
 
     def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
@@ -883,7 +906,7 @@ class StartDiashowSegment(DiashowSegment):
             fade_factor = time_in_seconds / self.__blending_time_in_seconds * speed
         else:
             fade_factor = 1.0
-        image = self.__loader.get_image(0)
+        image = self.__loader.get_image(self.__images, 0)
         assert image is not None
         if fade_factor >= 1.0:
             image.set_alpha(255)
@@ -893,15 +916,16 @@ class StartDiashowSegment(DiashowSegment):
 
 @final
 class EndDiashowSegment(DiashowSegment):
-    def __init__(self, timing: DiashowTiming, loader: ImageLoader):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, images: List[DiashowImage]):
         self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
+        self.__images = images
 
     def get_lifetime_in_seconds(self) -> float:
         return self.__blending_time_in_seconds
 
     def start(self) -> None:
-        self.__loader.load_image(-1)
+        self.__loader.load_image(self.__images, -1)
 
     def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
@@ -910,16 +934,17 @@ class EndDiashowSegment(DiashowSegment):
         else:
             fade_factor = 0.0
         if fade_factor > 0.0:
-            image = self.__loader.get_image(-1)
+            image = self.__loader.get_image(self.__images, -1)
             assert image is not None
             image.set_alpha(round(255.0 * fade_factor))
             blit_image_helper(surface, image)
 
 @final
 class CrossFadeDiashowSegment(DiashowSegment):
-    def __init__(self, timing: DiashowTiming, loader: ImageLoader, prev_index: int, next_index: int):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, images: List[DiashowImage], prev_index: int, next_index: int):
         self.__blending_time_in_seconds = timing.blending_time_in_seconds
         self.__loader = loader
+        self.__images = images
         self.__prev_index = prev_index
         self.__next_index = next_index
 
@@ -927,8 +952,8 @@ class CrossFadeDiashowSegment(DiashowSegment):
         return self.__blending_time_in_seconds
 
     def start(self) -> None:
-        self.__loader.load_image(self.__prev_index)
-        self.__loader.load_image(self.__next_index)
+        self.__loader.load_image(self.__images, self.__prev_index)
+        self.__loader.load_image(self.__images, self.__next_index)
 
     def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
@@ -936,11 +961,11 @@ class CrossFadeDiashowSegment(DiashowSegment):
             fade_factor = time_in_seconds / self.__blending_time_in_seconds * speed
         else:
             fade_factor = 1.0
-        prev_image = self.__loader.get_image(self.__prev_index)
+        prev_image = self.__loader.get_image(self.__images, self.__prev_index)
         assert prev_image is not None
         prev_image.set_alpha(255)
         blit_image_helper(surface, prev_image)
-        next_image = self.__loader.get_image(self.__next_index)
+        next_image = self.__loader.get_image(self.__images, self.__next_index)
         assert next_image is not None
         if fade_factor >= 1.0:
             next_image.set_alpha(255)
@@ -965,22 +990,23 @@ class FixedDiashowSegment(DiashowSegment):
         else:
             return timing.star_0_image_duration_in_seconds
 
-    def __init__(self, timing: DiashowTiming, loader: ImageLoader, image: DiashowImage, index: int):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, images: List[DiashowImage], index: int):
         self.__loader = loader
+        self.__images = images
         self.__index = index
-        self.__lifetime_in_seconds = self.__get_image_duration_in_seconds(timing, image) - timing.blending_time_in_seconds
+        self.__lifetime_in_seconds = self.__get_image_duration_in_seconds(timing, images[index]) - timing.blending_time_in_seconds
 
     def get_lifetime_in_seconds(self) -> float:
         return self.__lifetime_in_seconds
 
     def start(self) -> None:
-        self.__loader.load_image(self.__index)
+        self.__loader.load_image(self.__images, self.__index)
         if self.__index >= 0:
-            self.__loader.load_image(self.__index + 1)  # pre-load next image
+            self.__loader.load_image(self.__images, self.__index + 1)  # pre-load next image
 
     def update(self, surface: pygame.Surface, time_in_seconds: float, speed: float) -> None:
         surface.fill((0, 0, 0))
-        image = self.__loader.get_image(self.__index)
+        image = self.__loader.get_image(self.__images, self.__index)
         assert image is not None
         image.set_alpha(255)
         blit_image_helper(surface, image)
@@ -1027,15 +1053,23 @@ class DiashowTimelineFactory:
             segment=next_segment,
         ))
 
-    def create_timeline(self, images: List[DiashowImage]) -> List[DiashowTimelineSegment]:
+    def create_timeline(self, images: List[DiashowImage], image_order: ImageOrder) -> List[DiashowTimelineSegment]:
         timeline: List[DiashowTimelineSegment] = []
         if len(images) > 0:
-            self.__add_to_timeline(timeline, StartDiashowSegment(self.__timing, self.__loader))
+            # update image order
+            if image_order == ImageOrder.REVERSE:
+                images = list(reversed(images))
+            elif image_order == ImageOrder.RANDOM:
+                images = images.copy()
+                random.shuffle(images)
+
+            # create timeline
+            self.__add_to_timeline(timeline, StartDiashowSegment(self.__timing, self.__loader, images))
             for index, image in enumerate(images[:-1]):
-                self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, image, index))
-                self.__add_to_timeline(timeline, CrossFadeDiashowSegment(self.__timing, self.__loader, index, index + 1))
-            self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, images[-1], -1))
-            self.__add_to_timeline(timeline, EndDiashowSegment(self.__timing, self.__loader))
+                self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, images, index))
+                self.__add_to_timeline(timeline, CrossFadeDiashowSegment(self.__timing, self.__loader, images, index, index + 1))
+            self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, images, -1))
+            self.__add_to_timeline(timeline, EndDiashowSegment(self.__timing, self.__loader, images))
             self.__add_to_timeline(timeline, StopDiashowSegment())
         return timeline
 
@@ -1053,7 +1087,7 @@ class DiashowController(ABC):
         pass
 
     @abstractmethod
-    def set_speed(self, speed: Any) -> None:
+    def set_speed(self, speed: float) -> None:
         pass
 
     @abstractmethod
@@ -1063,35 +1097,49 @@ class DiashowController(ABC):
 @final
 class InDiashowMenu:
     MENU_SHOW_DURATION_IN_SECONDS = 2.0
-    MODE_TEXT_0 = "Wiedergabe"
-    MODE_TEXT_1 = "Pause"
+    MODE_SELECTOR_VALUES = [
+        ("Wiedergabe", False),
+        ("Pause", True),
+    ]
+    SPEED_SELECTOR_VALUES = [
+        ("normal", 1.0),
+        ("+1.5 x", 1.5),
+        ("+2.0 x", 2.0),
+        ("+3.0 x", 3.0),
+        ("+4.0 x", 4.0),
+        ("+5.0 x", 5.0),
+        ("-5.0 x", 1.0/5.0),
+        ("-4.0 x", 1.0/4.0),
+        ("-3.0 x", 1.0/3.0),
+        ("-2.0 x", 1.0/2.0),
+        ("-1.5 x", 1.0/1.5),
+    ]
 
-    def __init__(self, menu_creator: MenuCreator, diashow_controller: DiashowController, initial_pause: bool, initial_speed: float):
+    def __init__(self, menu_creator: MenuCreator, diashow_controller: DiashowController):
         self.__surface = menu_creator.get_surface()
         self.__end_time_in_seconds = 0.0
 
-        # get initial mode text
-        if initial_pause:
-            initial_mode_text = self.MODE_TEXT_1
-        else:
-            initial_mode_text = self.MODE_TEXT_0
-
-        # create menu
-        def set_pause(_: Tuple, value: Any) -> None:
+        # define some helper functions
+        def set_pause_helper(_: Tuple, value: Any) -> None:
             assert isinstance(value, bool)
             diashow_controller.set_pause(value)
+        def set_speed_helper(_: Tuple, value: Any) -> None:
+            assert isinstance(value, float)
+            diashow_controller.set_speed(value)
+
+        # create menu
         self.__menu = menu_creator.create_menu(
             menu_title="Diashow",
-            height=round(float(self.__surface.get_height()) * 0.5),
-            width=round(float(self.__surface.get_width()) * 0.5),
+            height=round(float(self.__surface.get_height()) * 0.45),
+            width=round(float(self.__surface.get_width()) * 0.4),
             theme_nr=2,
         )
-        self.__menu.add.selector("Modus: ", [(self.MODE_TEXT_0, False), (self.MODE_TEXT_1, True)], onchange=set_pause) \
-            .set_value(initial_mode_text)
+        self.__menu.add.selector("Modus: ", self.MODE_SELECTOR_VALUES, onchange=set_pause_helper) \
+            .set_value(self.MODE_SELECTOR_VALUES[0][0])
         self.__menu.add.button("Bild zurück", diashow_controller.goto_prev_image)
         self.__menu.add.button("Bild weiter", diashow_controller.goto_next_image)
-        self.__menu.add.range_slider("Geschwindigkeit: ", initial_speed, (0.1, 5.0), increment=0.1,
-            value_format=lambda x: str(round(x, 1)) + "x", onchange=diashow_controller.set_speed)
+        self.__menu.add.selector("Geschwindigkeit: ", self.SPEED_SELECTOR_VALUES, onchange=set_speed_helper) \
+            .set_value(self.SPEED_SELECTOR_VALUES[0][0])
         self.__menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         self.__menu.add.button("Verlassen", diashow_controller.cancel)
         self.__menu.disable()
@@ -1112,9 +1160,10 @@ class InDiashowMenu:
 class DiashowPlayer(DiashowController):
     MENU_WAITING_TIME_IN_SECONDS = 0.5
 
-    def __init__(self, play_node: DiashowNode, timing: DiashowTiming, menu_creator: MenuCreator):
+    def __init__(self, play_node: DiashowNode, timing: DiashowTiming, image_order: ImageOrder, menu_creator: MenuCreator):
         self.__play_node = play_node
         self.__timing = timing
+        self.__image_order = image_order
         self.__menu_creator = menu_creator
         self.__speed = 1.0
         self.__pause = False
@@ -1161,8 +1210,7 @@ class DiashowPlayer(DiashowController):
             self.__diashow_start_time -= new_start_time_offset
             new_timeline_segment.segment.start()
 
-    def set_speed(self, speed: Any) -> None:
-        assert isinstance(speed, float)
+    def set_speed(self, speed: float) -> None:
         if self.__diashow_timeline is not None:
             segment_time = self.__diashow_current_time - self.__diashow_start_time
             actual_timeline_segment = self.__diashow_timeline[self.__diashow_timeline_index]
@@ -1192,9 +1240,9 @@ class DiashowPlayer(DiashowController):
         pygame.display.flip()
 
         # prepare diashow
-        image_loader = ImageLoader(surface, self.__play_node.images)
+        image_loader = ImageLoader(surface)
         timeline_factory = DiashowTimelineFactory(self.__timing, image_loader)
-        self.__diashow_timeline = timeline_factory.create_timeline(self.__play_node.images)
+        self.__diashow_timeline = timeline_factory.create_timeline(self.__play_node.images, self.__image_order)
         assert self.__diashow_timeline is not None
         assert len(self.__diashow_timeline) > 0
         assert isinstance(self.__diashow_timeline[-1].segment, StopDiashowSegment)
@@ -1202,8 +1250,6 @@ class DiashowPlayer(DiashowController):
         menu = InDiashowMenu(
             menu_creator=self.__menu_creator,
             diashow_controller=self,
-            initial_pause=self.__pause,
-            initial_speed=self.__speed,
         )
 
         # start diashow
@@ -1281,6 +1327,7 @@ def main():
                     player = DiashowPlayer(
                         play_node=start_menu.get_play_node(),
                         timing=start_menu.get_timing(),
+                        image_order=start_menu.get_image_order(),
                         menu_creator=menu_creator,
                     )
                     player.start(surface)
