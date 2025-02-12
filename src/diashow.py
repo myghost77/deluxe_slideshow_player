@@ -46,7 +46,7 @@ BACKGROUND_IMAGE = pygame_menu.BaseImage(
 
 DEFAULT_VERTICAL_MARGIN = 35
 
-FPS = 50
+FPS = 25
 
 #-------------------------------------------------------------------------------
 
@@ -357,7 +357,8 @@ class DiashowCalculator:
             float(self.__3_star_cnt) * timing.star_3_image_duration_in_seconds + \
             float(self.__2_star_cnt) * timing.star_2_image_duration_in_seconds + \
             float(self.__1_star_cnt) * timing.star_1_image_duration_in_seconds + \
-            float(self.__0_star_cnt) * timing.star_0_image_duration_in_seconds
+            float(self.__0_star_cnt) * timing.star_0_image_duration_in_seconds + \
+            timing.blending_time_in_seconds  # there is one more blending
         timing.show_duration_in_minutes = actual_duration_in_seconds / 60.0
         return timing
 
@@ -765,128 +766,292 @@ class DiashowStartMenu(MenuFactory, MenuStarter):
 
 #-------------------------------------------------------------------------------
 
-@final
-class DiashowPlayer:
-    def __init__(self, timing: DiashowTiming, node: DiashowNode):
-        self.__timing = timing
-        self.__node = node
-        self.__image0: Optional[pygame.Surface] = None
-        self.__image1: Optional[pygame.Surface] = None
+class DiashowSegment(ABC):
+    @abstractmethod
+    def get_lifetime_in_seconds(self) -> float:
+        pass
 
-    def __load_image(self, surface: pygame.Surface, index: int) -> None:
-        if index < len(self.__node.images):
-            image: Optional[pygame.Surface] = pygame.image.load(self.__node.images[index].filename).convert_alpha()
-            assert image is not None
-            if image.get_height() == surface.get_height() and image.get_width() <= surface.get_width():
-                pass  # no re-scale
-            elif image.get_width() == surface.get_width() and image.get_height() <= surface.get_height():
-                pass  # no re-scale
+    @abstractmethod
+    def start(self) -> None:
+        pass
+
+    @abstractmethod
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        pass
+
+@final
+class ImageLoader:
+    def __init__(self, surface: pygame.Surface, images: List[DiashowImage]):
+        self.__surface = surface
+        self.__images = images
+        self.__image0: Optional[pygame.Surface] = None
+        self.__image0_index: Optional[int] = None
+        self.__image1: Optional[pygame.Surface] = None
+        self.__image1_index: Optional[int] = None
+
+    def __scale_image(self, image: pygame.Surface) -> pygame.Surface:
+        if image.get_height() == self.__surface.get_height() and image.get_width() <= self.__surface.get_width():
+            return image  # no re-scale
+        elif image.get_width() == self.__surface.get_width() and image.get_height() <= self.__surface.get_height():
+            return image  # no re-scale
+        else:
+            surface_height_f = float(self.__surface.get_height())
+            surface_width_f = float(self.__surface.get_width())
+            image_height_f = float(image.get_height())
+            image_width_f = float(image.get_width())
+            surface_ratio = surface_width_f / surface_height_f
+            image_ration = image_width_f / image_height_f
+            if image_ration <= surface_ratio:
+                new_image_height = self.__surface.get_height()
+                new_image_width = round(surface_height_f / image_height_f * image_width_f)
             else:
-                surface_height_f = float(surface.get_height())
-                surface_width_f = float(surface.get_width())
-                image_height_f = float(image.get_height())
-                image_width_f = float(image.get_width())
-                surface_ratio = surface_width_f / surface_height_f
-                image_ration = image_width_f / image_height_f
-                if image_ration <= surface_ratio:
-                    new_image_height = surface.get_height()
-                    new_image_width = round(surface_height_f / image_height_f * image_width_f)
-                else:
-                    new_image_height = round(surface_width_f / image_width_f * image_height_f)
-                    new_image_width = surface.get_width()
-                image = pygame.transform.scale(image, (new_image_width, new_image_height))
+                new_image_height = round(surface_width_f / image_width_f * image_height_f)
+                new_image_width = self.__surface.get_width()
+            return pygame.transform.scale(image, (new_image_width, new_image_height))
+
+    def __check_negative_index(self, index: int) -> int:
+        if index < 0:
+            index = len(self.__images) + index
+        assert index >= 0
+        return index
+
+    def load_image(self, index: int) -> None:
+        index = self.__check_negative_index(index)
+
+        # check, if it is already loaded
+        if index == self.__image0_index or index == self.__image1_index:
+            return
+
+        # read image
+        if index < len(self.__images):
+            image: Optional[pygame.Surface] = self.__scale_image(
+                pygame.image.load(self.__images[index].filename).convert_alpha(),
+            )
         else:
             image = None
+
+        # set image
         if index % 2 == 0:
+            self.__image0_index = index
             self.__image0 = image
         else:
+            self.__image1_index = index
             self.__image1 = image
 
+    def get_image(self, index: int) -> Optional[pygame.Surface]:
+        index = self.__check_negative_index(index)
+
+        # get image
+        if index % 2 == 0:
+            return self.__image0
+        else:
+            return self.__image1
+
+def blit_image_helper(surface: pygame.Surface, image: pygame.Surface)-> None:
+    y_pos = (surface.get_height() - image.get_height()) // 2
+    x_pos = (surface.get_width() - image.get_width()) // 2
+    surface.blit(image, (x_pos, y_pos))
+
+@final
+class StartDiashowSegment(DiashowSegment):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader):
+        self.__timing = timing
+        self.__loader = loader
+
+    def get_lifetime_in_seconds(self) -> float:
+        return self.__timing.blending_time_in_seconds
+
+    def start(self) -> None:
+        self.__loader.load_image(0)
+
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        surface.fill((0, 0, 0))
+        if self.__timing.blending_time_in_seconds > 0.0:
+            fade_factor = time_in_seconds / self.__timing.blending_time_in_seconds
+        else:
+            fade_factor = 1.0
+        image = self.__loader.get_image(0)
+        assert image is not None
+        if fade_factor >= 1.0:
+            image.set_alpha(255)
+        else:
+            image.set_alpha(round(255.0 * fade_factor))
+        blit_image_helper(surface, image)
+
+@final
+class EndDiashowSegment(DiashowSegment):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader):
+        self.__timing = timing
+        self.__loader = loader
+
+    def get_lifetime_in_seconds(self) -> float:
+        return self.__timing.blending_time_in_seconds
+
+    def start(self) -> None:
+        self.__loader.load_image(-1)
+
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        surface.fill((0, 0, 0))
+        if self.__timing.blending_time_in_seconds > 0.0:
+            fade_factor = 1.0 - time_in_seconds / self.__timing.blending_time_in_seconds
+        else:
+            fade_factor = 0.0
+        if fade_factor > 0.0:
+            image = self.__loader.get_image(-1)
+            assert image is not None
+            image.set_alpha(round(255.0 * fade_factor))
+            blit_image_helper(surface, image)
+
+@final
+class FadeOverDiashowSegment(DiashowSegment):
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, prev_index: int, next_index: int):
+        self.__timing = timing
+        self.__loader = loader
+        self.__prev_index = prev_index
+        self.__next_index = next_index
+
+    def get_lifetime_in_seconds(self) -> float:
+        return self.__timing.blending_time_in_seconds
+
+    def start(self) -> None:
+        self.__loader.load_image(self.__prev_index)
+        self.__loader.load_image(self.__next_index)
+
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        surface.fill((0, 0, 0))
+        if self.__timing.blending_time_in_seconds > 0.0:
+            fade_factor = time_in_seconds / self.__timing.blending_time_in_seconds
+        else:
+            fade_factor = 1.0
+        prev_image = self.__loader.get_image(self.__prev_index)
+        assert prev_image is not None
+        prev_image.set_alpha(255)
+        blit_image_helper(surface, prev_image)
+        next_image = self.__loader.get_image(self.__next_index)
+        assert next_image is not None
+        if fade_factor >= 1.0:
+            next_image.set_alpha(255)
+        else:
+            next_image.set_alpha(round(255.0 * fade_factor))
+        blit_image_helper(surface, next_image)
+
+@final
+class FixedDiashowSegment(DiashowSegment):
     @staticmethod
-    def get_pos(surface: pygame.Surface, image: pygame.Surface)-> Tuple[int, int]:
-        y_pos = (surface.get_height() - image.get_height()) // 2
-        x_pos = (surface.get_width() - image.get_width()) // 2
-        return (x_pos, y_pos)
+    def __get_image_duration_in_seconds(timing: DiashowTiming, image: DiashowImage) -> float:
+        if image.rating == 2:
+            return timing.star_2_image_duration_in_seconds
+        elif image.rating == 3:
+            return timing.star_3_image_duration_in_seconds
+        elif image.rating == 4:
+            return timing.star_4_image_duration_in_seconds
+        elif image.rating == 5:
+            return timing.star_5_image_duration_in_seconds
+        elif image.rating == 1:
+            return timing.star_1_image_duration_in_seconds
+        else:
+            return timing.star_0_image_duration_in_seconds
+
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader, image: DiashowImage, index: int):
+        self.__loader = loader
+        self.__index = index
+        self.__lifetime_in_seconds = self.__get_image_duration_in_seconds(timing, image) - timing.blending_time_in_seconds
+
+    def get_lifetime_in_seconds(self) -> float:
+        return self.__lifetime_in_seconds
+
+    def start(self) -> None:
+        self.__loader.load_image(self.__index)
+        if self.__index >= 0:
+            self.__loader.load_image(self.__index + 1)  # pre-load next image
+
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        surface.fill((0, 0, 0))
+        image = self.__loader.get_image(self.__index)
+        assert image is not None
+        image.set_alpha(255)
+        blit_image_helper(surface, image)
+
+@final
+class StopDiashowSegment(DiashowSegment):
+    def get_lifetime_in_seconds(self) -> float:
+        return 0.0
+
+    def start(self) -> None:
+        pass
+
+    def update(self, surface: pygame.Surface, time_in_seconds: float) -> None:
+        pass
+
+@final
+class DiashowTimelineFactory:
+    def __init__(self, timing: DiashowTiming, loader: ImageLoader):
+        self.__timing = timing
+        self.__loader = loader
+
+    @staticmethod
+    def __add_to_timeline(timeline: List[Tuple[float, DiashowSegment]], next_segment: DiashowSegment) -> None:
+        if len(timeline) > 0:
+            last_time, last_segment = timeline[-1]
+            next_time = last_time + last_segment.get_lifetime_in_seconds()
+        else:
+            next_time = 0.0
+        timeline.append((next_time, next_segment))
+
+    def create_timeline(self, images: List[DiashowImage]) -> List[Tuple[float, DiashowSegment]]:
+        timeline: List[Tuple[float, DiashowSegment]] = []
+        if len(images) > 0:
+            self.__add_to_timeline(timeline, StartDiashowSegment(self.__timing, self.__loader))
+            for index, image in enumerate(images[:-1]):
+                self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, image, index))
+                self.__add_to_timeline(timeline, FadeOverDiashowSegment(self.__timing, self.__loader, index, index + 1))
+            self.__add_to_timeline(timeline, FixedDiashowSegment(self.__timing, self.__loader, images[-1], -1))
+            self.__add_to_timeline(timeline, EndDiashowSegment(self.__timing, self.__loader))
+            self.__add_to_timeline(timeline, StopDiashowSegment())
+        return timeline
+
+@final
+class DiashowPlayer:
+    def __init__(self, play_node: DiashowNode, timing: DiashowTiming):
+        self.__play_node = play_node
+        self.__timing = timing
 
     def start(self, surface: pygame.Surface) -> None:
         clock = pygame.time.Clock()
 
-        # clean screen and load first image
+        # clean-up screen
         surface.fill((0, 0, 0))
         pygame.display.flip()
-        self.__load_image(surface, 0)
+
+        # prepare diashow
+        image_loader = ImageLoader(surface, self.__play_node.images)
+        timeline_factory = DiashowTimelineFactory(self.__timing, image_loader)
+        timeline = timeline_factory.create_timeline(self.__play_node.images)
+        assert len(timeline) > 0
+        assert isinstance(timeline[-1][1], StopDiashowSegment)
+        timeline[0][1].start()
 
         # start diashow
-        current_index = 0
-        loaded_index = 0
-        fade_mode = True
+        timeline_index = 0
         start_time = get_current_time_since_epoch_in_seconds()
-        next_time = self.__timing.blending_time_in_seconds
         while True:
-            for event in pygame.event.get():  # TODO: Events!
-                if event.type == pygame.QUIT:
-                    break
-
-            #
             current_time = get_current_time_since_epoch_in_seconds() - start_time
-            fade_factor = 1.0
-            if fade_mode:
-                if current_time < next_time:
-                    fade_factor = current_time / next_time
-                else:
-                    fade_mode = False
-
-                    if current_index < len(self.__node.images):
-                        rating = self.__node.images[current_index].rating
-                        if rating == 2:
-                            next_time = self.__timing.star_2_image_duration_in_seconds
-                        elif rating == 3:
-                            next_time = self.__timing.star_3_image_duration_in_seconds
-                        elif rating == 4:
-                            next_time = self.__timing.star_4_image_duration_in_seconds
-                        elif rating == 5:
-                            next_time = self.__timing.star_5_image_duration_in_seconds
-                        elif rating == 1:
-                            next_time = self.__timing.star_1_image_duration_in_seconds
-                        else:
-                            next_time = self.__timing.star_0_image_duration_in_seconds
-            else:
-                if loaded_index <= current_index:
-                    loaded_index = current_index + 1
-                    self.__load_image(surface, loaded_index)
-                else:
-                    if current_time >= next_time:
-                        current_index += 1
-                        start_time += next_time
-                        next_time = self.__timing.blending_time_in_seconds
-                        fade_factor = 0.0
-                        fade_mode = True
-
-            #
-            surface.fill((0, 0, 0))
-            if current_index % 2 == 0:
-                main_image = self.__image0
-                prev_image = self.__image1
-            else:
-                main_image = self.__image1
-                prev_image = self.__image0
-            if fade_mode:
-                if main_image is None:
-                    assert prev_image is not None
-                    prev_image.set_alpha(round(255.0 * (1.0 - fade_factor)))
-                    surface.blit(prev_image, self.get_pos(surface, prev_image))
-                elif prev_image is not None:
-                    prev_image.set_alpha(255)
-                    surface.blit(prev_image, self.get_pos(surface, prev_image))
-            elif main_image is None:
-                break
-            if main_image is not None:
-                main_image.set_alpha(round(255.0 * fade_factor))
-                surface.blit(main_image, self.get_pos(surface, main_image))
+            next_time, next_segment = timeline[timeline_index + 1]
+            index_changed = False
+            if current_time >= next_time:
+                if isinstance(next_segment, StopDiashowSegment):
+                    break
+                timeline_index += 1
+                index_changed = True
+                next_segment.start()
+            actual_time, actual_segment = timeline[timeline_index]
+            actual_segment.update(
+                surface=surface,
+                time_in_seconds=current_time - actual_time,
+            )
             pygame.display.flip()
-
-            #
-            clock.tick(FPS)
+            if not index_changed:
+                clock.tick(FPS)
 
 #-------------------------------------------------------------------------------
 
@@ -901,6 +1066,7 @@ def main():
 
     # start Diashow menu
     pygame.init()
+    pygame.mouse.set_visible(False)
     try:
         surface = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         menu_creator = MenuCreator(surface)
@@ -917,15 +1083,13 @@ def main():
                 start_menu.start(menu_creator)
                 if not start_menu.is_canceled():
                     player = DiashowPlayer(
-                        node=start_menu.get_play_node(),
+                        play_node=start_menu.get_play_node(),
                         timing=start_menu.get_timing(),
                     )
                     player.start(surface)
-                continue
-            if play_mode == MainMenu.SAVE_CONFIG_MODE:
+            elif play_mode == MainMenu.SAVE_CONFIG_MODE:
                 print("SAVE")  # TODO
-                continue
-            if play_mode == MainMenu.EXIT_MODE:
+            elif play_mode == MainMenu.EXIT_MODE:
                 print()
                 print("Bye bye :-) !!!")
                 break
