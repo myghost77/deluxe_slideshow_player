@@ -26,6 +26,7 @@ import random
 import pygame
 import pygame_menu
 import exiftool
+import pickle
 
 #-------------------------------------------------------------------------------
 
@@ -34,7 +35,10 @@ def get_current_time_since_epoch_in_seconds() -> float:
 
 #-------------------------------------------------------------------------------
 
-DIASHOW_FOLDER = "/Volumes/Daten/Pictures/Diashows/01 - Mach mal Urlaub/2022 - Bulgarien; Sonnenstrand [290]/"  # TODO
+DIASHOW_FOLDER = "/Volumes/Daten/Pictures/Diashows/"  # TODO
+
+DIASHOW_IMAGE_LIST_FILENAME = "diashow_image_list.dsp"
+CONFIG_FILENAME = "diashow_configuration.dsp"
 
 FILENAME_TAG = "SourceFile"
 RATING_TAG = "XMP:Rating"
@@ -101,29 +105,40 @@ class DiashowReader:
     def __read_sorted_images(self, node: DiashowNode) -> None:
         print(f"Reading folder: {node.folder}")
 
-        # read all files from folder
-        filename_list: List[str] = []
-        for filename in os.listdir(node.folder):
-            filename = os.path.join(node.folder, filename)
-            if os.path.isfile(filename) and filename.upper().endswith(".JPG"):
-                filename_list.append(filename)
+        # check if an image list file exists to speed-up the reading of all images
+        diashow_image_list_filename = os.path.join(node.folder, DIASHOW_IMAGE_LIST_FILENAME)
+        if os.path.isfile(diashow_image_list_filename):
+            # load image list file
+            with open(diashow_image_list_filename, "rb") as diashow_image_list_file:
+                node.images = pickle.load(diashow_image_list_file)
+        else:
+            # read all files from folder
+            filename_list: List[str] = []
+            for filename in os.listdir(node.folder):
+                filename = os.path.join(node.folder, filename)
+                if os.path.isfile(filename) and filename.upper().endswith(".JPG"):
+                    filename_list.append(filename)
 
-        # create image objects
-        if filename_list:
-            with exiftool.ExifToolHelper() as et:
-                for tag_dict in et.get_tags(filename_list, RATING_TAG):
-                    filename = tag_dict[FILENAME_TAG]
-                    if RATING_TAG in tag_dict:
-                        rating = int(tag_dict[RATING_TAG])
-                    else:
-                        rating = 0
-                    node.images.append(
-                        DiashowImage(
-                            filename=filename,
-                            rating=rating,
+            # create image objects
+            if filename_list:
+                with exiftool.ExifToolHelper() as et:
+                    for tag_dict in et.get_tags(filename_list, RATING_TAG):
+                        filename = tag_dict[FILENAME_TAG]
+                        if RATING_TAG in tag_dict:
+                            rating = int(tag_dict[RATING_TAG])
+                        else:
+                            rating = 0
+                        node.images.append(
+                            DiashowImage(
+                                filename=filename,
+                                rating=rating,
+                            )
                         )
-                    )
-            node.images.sort()
+                node.images.sort()
+
+            # dump image list file
+            with open(diashow_image_list_filename, "wb") as diashow_image_list_file:
+                pickle.dump(node.images, diashow_image_list_file)
 
         # create child objects
         for child in node.child_nodes:
@@ -641,6 +656,8 @@ class DiashowMenuFactory(MenuFactory):
 
 @final
 class MainMenuCreator:
+    MAIN_TITLE = "Diashow"
+
     def __init__(self, main_node: DiashowNode, config: Config):
         self.__main_node = main_node
         self.__options_menu_factory = OptionsMenuFactory(config)
@@ -650,7 +667,7 @@ class MainMenuCreator:
         change_options_text = "Optionen anpassen"
         save_options_text = "Optionen speichern"
         back_text = "Zurück"
-        menu = menu_creator.create_menu("Diashow")
+        menu = menu_creator.create_menu(self.MAIN_TITLE)
         main_menu = MainMenu(menu)
         menu.add.button(select_diashow_text, DiashowMenuFactory(main_menu=main_menu, play_node=self.__main_node, hierachy=[]).create_menu(
             menu_creator=menu_creator,
@@ -662,7 +679,7 @@ class MainMenuCreator:
             menu_title=change_options_text,
             back_text=back_text,
         ))
-        # TODO: menu.add.button(save_options_text, main_menu.save_options)
+        menu.add.button(save_options_text, main_menu.save_options)
         menu.add.vertical_margin(DEFAULT_VERTICAL_MARGIN)
         menu.add.button("Verlassen", main_menu.exit)
         return main_menu
@@ -1130,7 +1147,7 @@ class InDiashowMenu:
 
         # create menu
         self.__menu = menu_creator.create_menu(
-            menu_title="Diashow",
+            menu_title="Diashow anpassen",
             height=round(float(self.__surface.get_height()) * 0.45),
             width=round(float(self.__surface.get_width()) * 0.4),
             theme_nr=2,
@@ -1299,6 +1316,25 @@ class DiashowPlayer(DiashowController):
 
 #-------------------------------------------------------------------------------
 
+def get_config_filename() -> str:
+    return os.path.join(DIASHOW_FOLDER, CONFIG_FILENAME)
+
+def load_config() -> Config:
+    config_filename = get_config_filename()
+    if os.path.isfile(config_filename):
+        with open(config_filename, "rb") as config_file:
+            return pickle.load(config_file)
+    else:
+        return create_default_config()
+
+def save_config(config: Config):
+    config_filename = get_config_filename()
+    with open(config_filename, "wb") as config_file:
+        pickle.dump(config, config_file)
+    print(f"Config saved to '{config_filename}'!")
+
+#-------------------------------------------------------------------------------
+
 def main():
     # read Diashow nodes
     assert os.path.exists(DIASHOW_FOLDER)
@@ -1306,7 +1342,7 @@ def main():
     print_diashow_nodes(main_node)
 
     # read configuration
-    config = create_default_config()
+    config = load_config()
 
     # start Diashow menu
     pygame.init()
@@ -1333,7 +1369,24 @@ def main():
                     )
                     player.start(surface)
             elif play_mode == MainMenu.SAVE_CONFIG_MODE:
-                print("SAVE")  # TODO
+                # show empty screen
+                save_menu_1 = menu_creator.create_menu(MainMenuCreator.MAIN_TITLE)
+                save_menu_1.draw(surface)
+                pygame.display.flip()
+
+                # save configuration
+                save_config(config)
+
+                # show message
+                save_menu_2 = menu_creator.create_menu(MainMenuCreator.MAIN_TITLE)
+                save_menu_2.add.label("Optionen erfolgreich gespeichert!")
+                save_menu_2.draw(surface)
+                pygame.display.flip()
+                time.sleep(2.5)
+
+                # kill temp menus
+                del save_menu_2
+                del save_menu_1
             elif play_mode == MainMenu.EXIT_MODE:
                 print()
                 print("Bye bye :-) !!!")
